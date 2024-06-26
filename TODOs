@@ -1,0 +1,2 @@
+New NACA profiles and the ability to define a custom profile.
+Add docstrings to xfoil.py as it is mostly functional by now.
