@@ -11,7 +11,7 @@ class Xfoil():
         
         self.process = subprocess.Popen(self.exe_path, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.PIPE, text=True)
 
-    def readPolar(self, path):
+    def read_polar(self, path):
         with open(path, "r") as txt:
             data = txt.readlines()
             data = data[-1].split("   ")
@@ -28,12 +28,13 @@ class Xfoil():
         self.polar = self.readPolar(self.output_path)
         return self.polar
     
-    def getPolar(self):
+    def get_polar(self):
         return self.polar
 
-xfoil = Xfoil("naca0012", 0.6, 200000)
-polar_info = xfoil.simulate(alfa=6)
-# polar_info = xfoil.getPolar()
-print(polar_info[0])
+if __name__ == "__main__":
+    xfoil = Xfoil("naca0012", 0.6, 200000)
+    polar_info = xfoil.simulate(alfa=6)
+    # polar_info = xfoil.get_polar()
+    print(polar_info[0])
 
 
