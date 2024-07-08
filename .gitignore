@@ -108,3 +108,4 @@ ENV/
 .vscode/
 .idea/
 
+data/XFOIL6.99/polar.txt
