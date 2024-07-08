@@ -1,4 +1,8 @@
 import numpy as np
+from scipy.interpolate import interp1d
+
+from xfoil import Xfoil
+
 
 def find_nearest_idx(array, val):
     arr = np.asarray(array)
@@ -12,6 +16,10 @@ def find_interval_idx(array, val):
         if array[i][0] <= val < array[i+1][0]:
             break
     return i
+
+def interpolate(val, x1, x2, y1, y2):
+    slope = (y2 - y1) / (x2 - x1)
+    return (val - x1) * slope + y1
 
 def read_txt(filepath):
     with open(filepath, "r") as f:
@@ -27,11 +35,35 @@ def probe_txt(filepath, x):
     slope = (data[idx+1][1] - data[idx][1]) / (data[idx+1][0] - data[idx][0])
     probe = (x - data[idx][0]) * slope + data[idx][1] 
     return probe
+    
+def reynolds(velocity, ch_len, kin_vis):
+    return velocity * ch_len / kin_vis
 
-def request_xfoil_probe(alfa, reynolds, mach):
-    pass
+class Polar():
+    def __init__(self, airfoil, mach, reynolds, new_polar=True):
+        xfoil = Xfoil(airfoil, new_polar)
+        if new_polar:
+            print("Generating XFOIL polar...")
+            xfoil.simulate(mach, reynolds)
+        try:
+            self.polar = xfoil.read_polar()
+        except FileNotFoundError:
+            print("Polar data not found. Generating new XFOIL polar...")
+            xfoil.simulate(mach, reynolds)
+            self.polar = xfoil.read_polar()
+
+    def get_polar(self, alfa):
+        func = interp1d(self.polar[:,0], [self.polar[:,1], self.polar[:,2]], kind='linear', axis=1)
+        cl, cd = func(alfa)
+        return cl, cd
+    
+    def get_cl_slope(self):
+        return (self.polar[2,1] - self.polar[0,1]) / (np.deg2rad(self.polar[2,0]) - np.deg2rad(self.polar[0,0]))
+
+
+    
 
 if __name__ == "__main__":
-    filepath = "data/figures/MeanLiftCoef.vs.MeanDragCoef_(Fig3-1.AMCP706-201).txt"
-    print(probe_txt(filepath, 0.2))
+    polar = Polar("naca23012", 0.3, 4000000, False)
+    print(polar.get_polar(3.5))
 
