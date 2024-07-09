@@ -113,9 +113,27 @@ def calculate_flat_plate_area(image_path, width, height, body_cd): # TODO: Saves
     component_reference_area = ratio * height * width
     return component_reference_area * body_cd
 
+def walds_equation(normalized_flight_speed, downwash_velocity_ratio, alfa):
+    output = downwash_velocity_ratio**4 - 2 * downwash_velocity_ratio**3 * normalized_flight_speed * np.sin(np.deg2rad(alfa)) \
+            + normalized_flight_speed**2 * downwash_velocity_ratio**2
+    return output
+
+def walds_solver(free_stream_velocity, hover_induced_velocity, alfa, iter=100):
+    normalized_flight_speed = free_stream_velocity / hover_induced_velocity
+    downwash_velocity_ratio = 1 # Initialization.
+    gamma = 0.02 # Step size.
+    target = 1
+
+    for _ in range(100):
+        output = walds_equation(normalized_flight_speed, downwash_velocity_ratio, alfa)
+        downwash_velocity_ratio -= (output - target) * gamma
+
+    return downwash_velocity_ratio
+
+
 
 if __name__ == "__main__":
     # polar = Polar("naca23012", 0.3, 4000000, False)
     # print(polar.get_polar(3.5))
 
-    print(get_flat_plate_area())
+    print(walds_solver(20, 10, 0))
