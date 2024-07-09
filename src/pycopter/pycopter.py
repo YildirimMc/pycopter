@@ -81,7 +81,6 @@ class Rotor():
 
         # Blade element-wise thrust calculation.
         thrust = 0
-        power = 0
         for i, r_i in enumerate(np.linspace(0, self.r, n, endpoint=False)):
             thrust += 2 * density * np.pi * (r_i + dr/2) * dr * induced_vel[i]**2
 
@@ -96,23 +95,24 @@ class Rotor():
         self.a = self.polar.get_cl_slope()
         self.alfa = 6 * self.ct / (self.solidity * self.a * self.tip_loss**3)
         self.cd_mean = 0.0087 - 0.0216*self.alfa + 0.4*self.alfa**2 # TODO: This depends on empirical data based on naca0012. Get the relation from the polar, instead. Furthermore, this needs to satisfy Fig3-1 for naca0012(prolly).
-        self.hover_power = thrust**1.5 / (self.tip_loss * np.sqrt(2*density * self.rotor_disk_area)) + density * self.num_blades * self.chord * (self.r**4) * (self.omega**3) * self.cd_mean / 8 
-        self.hover_horsepower = self.hover_power * 0.00134102209
+        self.hover_power_induced = thrust**1.5 / (self.tip_loss * np.sqrt(2*density * self.rotor_disk_area))
+        self.hover_power_profile = density * self.num_blades * self.chord * (self.r**4) * (self.omega**3) * self.cd_mean / 8 
+        self.hover_power = self.hover_power_induced + self.hover_power_profile
         self.cp = self.hover_power / (density * np.pi * self.r**5 * self.omega**3)
         self.merit = 0.707 * self.ct**1.5 / self.cp
         self.merit_max = 0.707 * self.ct**1.5 / (self.ct**1.5 / (np.sqrt(2) * self.tip_loss) + self.solidity * self.cd_mean / 8)
-        print("HP:", self.hover_horsepower, "| Coefs:", self.ct, self.cp, "| Merits:", self.merit, self.merit_max, self.merit / self.merit_max, "| B:", self.tip_loss)
+        print("HP Induced:", self.hover_power_induced*0.00134102209, "| HP Profile:", self.hover_power_profile*0.00134102209, "| HP Total:", self.hover_power*0.00134102209)
+        print("Coeffs:", self.ct, self.cp, "| Merits:", self.merit, self.merit_max, self.merit / self.merit_max, "| Tip Loss:", self.tip_loss)
 
     def forward_flight(self, velocity, density=1.225, body="mi-8"):
         print("\nForward flight conditions.")
         if not self.is_hovered: 
             print("Running hover calculations for level blade first...")
             self.hover(0)
+        downwash_velocity_ratio = utils.walds_solver(velocity, self.hover_induced_vel, self.alfa)
+        power_induced = downwash_velocity_ratio * self.hover_power_induced
+        
         advance_ratio = velocity * np.cos(self.alfa) / (self.omega * self.r)
-        v_prime = np.sqrt((velocity - self.hover_induced_vel * np.sin(self.alfa))**2 + (self.hover_induced_vel * np.cos(self.alfa))**2) # Pythagorean of free-stream velocity and induced velocity.
-        thrust_induced = density * self.rotor_disk_area * v_prime * 2 * self.hover_induced_vel
-        power_induced = thrust_induced * (self.hover_induced_vel - v_prime * np.sin(self.alfa)) # TODO: Power too high.
-
         power_profile = (density * self.num_blades * self.chord * self.r**4 * self.omega**3 * self.cd_mean / 8) * (1 + 4.65*advance_ratio**2)
         thrust_profile = power_profile / self.r
 
@@ -121,7 +121,8 @@ class Rotor():
 
         power_total = power_induced + power_profile + power_parasite
         horsepower_total = power_total * 0.00134102209
-        print("Horsepower ### Induced:", power_induced*0.00134102209, "| Profile:", power_profile* 0.00134102209, "| Parasite:", power_parasite* 0.00134102209, "| Total:", horsepower_total)
+        print(f"Alfa: {self.alfa} | Downwash Velocity Ratio: {downwash_velocity_ratio} | Check if {thrust_profile/(2*density*self.rotor_disk_area)} is smaller than {velocity**2 / 2} for horsepowers below.")
+        print("HP Induced:", power_induced*0.00134102209, "| HP Profile:", power_profile*0.00134102209, "| HP Parasite:", power_parasite*0.00134102209, "| HP Total:", horsepower_total)
 
         # TODO: Implement blade stall.
     
@@ -143,6 +144,6 @@ class Optimizer():
 
 if __name__ == "__main__":
     rotor = Rotor(new_polar=False)
-    rotor.hover(7)
-    rotor.forward_flight(20)
+    rotor.hover(4)
+    rotor.forward_flight(60)
     rotor.plot()
