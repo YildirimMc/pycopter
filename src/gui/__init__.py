@@ -1,0 +1,1 @@
+from .pyrotorui import Ui_MainWindow 
