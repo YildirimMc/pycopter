@@ -20,7 +20,7 @@ class Xfoil():
         """
         """
         inputs_init = [self.airfoil, "oper", "iter 400", "v", str(reynolds), f"mach {mach}", "pacc", self.output_path + "\n"]
-        inputs = [f"alfa {alfa}" for alfa in np.arange(0, self.max_theta + 1)]
+        inputs = [f"alfa {alfa}" for alfa in np.arange(-8, self.max_theta + 6)]
         command = ""
         for input in inputs_init:
             command = command + input + "\n"
