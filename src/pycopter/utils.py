@@ -3,7 +3,7 @@ from scipy.interpolate import interp1d
 from PIL import Image
 import sys
 
-from xfoil import Xfoil
+from .xfoil import Xfoil
 
 
 def find_nearest_idx(array, val):
