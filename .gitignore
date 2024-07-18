@@ -109,3 +109,5 @@ ENV/
 .idea/
 
 data/XFOIL6.99/polar.txt
+references/
+data/cra_images/
