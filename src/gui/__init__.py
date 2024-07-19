@@ -1,1 +1,1 @@
-from .pyrotorui import Ui_MainWindow 
+from .pyrotorui import Ui_pycopter 

@@ -91,9 +91,7 @@ class Rotor():
                 iter +=1
                 if iter > 10:
                     break
-          
-            ######################################################################################################### CHECK IF Mi8 IN DCS CAN LIFT WITH 8 THETA UNDER 13 TONS. IGE SHOULD BE EVEN LESS. ###########################################################
-            
+
             # Blade elemental thrust.
             thrust = 0
             drag = 0
@@ -127,7 +125,7 @@ class Rotor():
         print("SHP Induced:", self.hover_power_induced*0.00134102209, "| SHP Profile:", self.hover_power_profile*0.00134102209, "| SHP Total:", self.hover_power_total*0.00134102209)
         print("Coeffs:", self.ct, self.cp, "| Merits:", self.merit, self.merit_max, self.merit / self.merit_max, "| Tip Loss:", self.tip_loss)
 
-    def forward_flight(self, velocity, density=1.225, body="mi-8"):
+    def forward_flight(self, velocity, density=1.225, flat_plate_area=3.5):
         if not (isinstance(velocity, float) or isinstance(velocity, int)):
             raise ValueError("Forward flight velocity must be a numeric singleton.")
         if not self.is_hovered: 
@@ -139,7 +137,6 @@ class Rotor():
         self.alfa = 0 # pg.93, AMCP 706-201
 
         advance_ratio = velocity / (self.omega * self.r) # velocity * np.cos(self.alfa) / (self.omega * self.r)
-        flat_plate_area = get_flat_plate_area(body)
         self.downwash_velocity_ratio = walds_solver(velocity, self.hover_induced_vel, self.alfa)
         
         self.power_induced = self.downwash_velocity_ratio * self.hover_power_induced
