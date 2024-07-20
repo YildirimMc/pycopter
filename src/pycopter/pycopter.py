@@ -76,7 +76,7 @@ class Rotor():
                 induced_vel_old = induced_vel.copy()
                 for i, r_i in enumerate(np.linspace(0, self.r, n, endpoint=False)):
                     element_center = (r_i + dr/2)
-                    elemental_theta = theta + (element_center / self.r) * (self.washout)
+                    elemental_theta = theta + (element_center / self.r) * (self.washout) # TODO: Implement dual washout
                     phi[i] = np.arctan(induced_vel[i] / (self.omega * element_center))
                     alfa[i] = elemental_theta - np.rad2deg(phi[i])
                     if alfa[i] < -1: alfa[i] = -1
