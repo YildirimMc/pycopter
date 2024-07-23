@@ -24,8 +24,8 @@ class Interface():
         self.mpl_layout = QVBoxLayout()
         self.ui.mpl_widget.setLayout(self.mpl_layout)
 
-        self.plots_dict = {"Range, Power vs. Velocity": self.plot_range_endurance_vs_velocity, 
-                           "Specific Range, Endurance, LD vs. Velocity": self.plot_sr_ld_vs_velocity,
+        self.plots_dict = {"Range, Endurance vs. Velocity": self.plot_range_endurance_vs_velocity, 
+                           "Specific Range, LD vs. Velocity": self.plot_sr_ld_vs_velocity,
                            "Max FMR vs. Ct/σ": self.plot_ctsigma_to_maxmerit,
                            "Downwash Velocity Ratio vs. Normalized Flight Speed": self.plot_nfs_to_dvr,
                            "Ground Effect vs. Height": self.plot_ground_effect,
@@ -88,9 +88,12 @@ class Interface():
             item = self.mpl_layout.takeAt(0)
         self.mpl_layout.addWidget(canvas)
         
-    ### PLOT FUNCTIONS ###
+    ##################### PLOT FUNCTIONS #####################
+
     def plot_powers_vs_velocity(self):
         gross = self.ui.grossSpinner.value()
+        flat_plate_area = self.ui.fpaSpinner.value()
+        density = self.ui.densitySpinner.value()
 
         self.rotor.hover(gross)
         test_velocities = np.linspace(10,80, 50)
@@ -99,7 +102,7 @@ class Interface():
         parasite_powers = induced_powers.copy()
  
         for i, vel in enumerate(test_velocities):
-            self.rotor.forward_flight(vel)
+            self.rotor.forward_flight(vel, density, flat_plate_area)
             induced_powers[i] = self.rotor.power_induced
             profile_powers[i] = self.rotor.power_profile
             parasite_powers[i] = self.rotor.power_parasite
@@ -124,9 +127,11 @@ class Interface():
 
     def plot_range_endurance_vs_velocity(self):
         sfc = self.ui.sfcSpinner.value()
-        transmission_loss = 1 + self.ui.transmissionLossSpinner.value()
+        transmission_loss = self.ui.transmissionLossSpinner.value()
         gross = self.ui.grossSpinner.value()
         fuel = self.ui.fuelCapSpinner.value()
+        flat_plate_area = self.ui.fpaSpinner.value()
+        density = self.ui.densitySpinner.value()
 
         self.rotor.hover(gross)
         lift = self.rotor.hover_thrust
@@ -135,38 +140,42 @@ class Interface():
         total_powers = effective_drags.copy()
 
         for i, vel in enumerate(test_velocities):
-            self.rotor.forward_flight(vel)
+            self.rotor.forward_flight(vel, density, flat_plate_area)
             effective_drags[i] = self.rotor.drag_induced + self.rotor.drag_profile + self.rotor.body_drag
             total_powers[i] = self.rotor.power_total
         total_powers /= 1000
-        engine_powers = total_powers.copy()
-        engine_powers *= transmission_loss
+        engine_powers = 1.13 * total_powers.copy() / (1 - transmission_loss) #0.13 goes to tail rotor
         test_velocities *= 3.6
         
+        sfc = 1.13 * sfc / (1 - transmission_loss) # 1.13 for tail rotor
+
         ld = lift/effective_drags
-        brequet_ranges = 325/sfc * ld * np.log(gross/(gross-fuel))  
+        fuel_consumptions = engine_powers * sfc
+        endurance = fuel / fuel_consumptions
+        breguet_ranges = 366/sfc * ld * np.log(gross/(gross-fuel)) # 366 for km instead of n-miles
         
         fig, ax1 = plt.subplots()
 
-        ax1.plot(test_velocities, total_powers*1.34102209, color="red", label="SHP")
-        ax1.set_title("Range, Power - Velocity")
+        ax1.plot(test_velocities, endurance, color="red", label="Endurance")
+        ax1.set_title("Range, Endurance - Velocity")
         ax1.set_xlabel("Free Stream Velocity [km/hr]")
-        ax1.set_ylabel("Shaft Horsepower [SHP]")
-        ax1.set_ylim([0, max(total_powers*1.34102209)+100])
+        ax1.set_ylabel("Endurance [hr]")
 
         ax2 = ax1.twinx()
-        ax2.plot(test_velocities, brequet_ranges, label="Range")
+        ax2.plot(test_velocities, breguet_ranges, label="Range")
         ax2.set_ylabel("Range [km]")
 
         fig.legend()
-        ax2.grid()
+        ax1.grid()
         return fig
         
     def plot_sr_ld_vs_velocity(self):
         sfc = self.ui.sfcSpinner.value()
-        transmission_loss = 1 + self.ui.transmissionLossSpinner.value()
+        transmission_loss = self.ui.transmissionLossSpinner.value()
         gross = self.ui.grossSpinner.value()
         fuel = self.ui.fuelCapSpinner.value()
+        flat_plate_area = self.ui.fpaSpinner.value()
+        density = self.ui.densitySpinner.value()
 
         self.rotor.hover(gross)
         lift = self.rotor.hover_thrust
@@ -175,31 +184,28 @@ class Interface():
         total_powers = effective_drags.copy()
 
         for i, vel in enumerate(test_velocities):
-            self.rotor.forward_flight(vel)
+            self.rotor.forward_flight(vel, density, flat_plate_area)
             effective_drags[i] = self.rotor.drag_induced + self.rotor.drag_profile + self.rotor.body_drag
             total_powers[i] = self.rotor.power_total
         total_powers /= 1000
         engine_powers = total_powers.copy()
-        engine_powers *= transmission_loss
+        engine_powers = 1.13 * engine_powers / (1 - transmission_loss) #0.13 goes to tail rotor
         test_velocities *= 3.6
         
         ld = lift/effective_drags
         fuel_consumptions = engine_powers * sfc
-
-        fuel_consumptions = engine_powers * sfc
         specific_range = test_velocities / (fuel_consumptions) # km range / kg fuel
-        endurance = fuel / fuel_consumptions
 
         fig, ax1 = plt.subplots()
 
-        ax1.plot(test_velocities, endurance, color="red", label="Endurance [hr]")
-        ax1.plot(test_velocities, ld, label="Lift/Drag Ratio")
-        ax1.set_title("Specific Range and Lift/Drag Ratios")
+        ax1.plot(test_velocities, specific_range, color="orange", label="Specific Range")
+        ax1.set_title("Specific Range, Lift/Drag Ratio - Velocity")
         ax1.set_xlabel("Free Stream Velocity [km/hr]")
+        ax1.set_ylabel("Specific Range [km/kgf], LD Ratio")
 
         ax2 = ax1.twinx()
-        ax2.plot(test_velocities, specific_range, color="orange", label="Specific Range")
-        ax2.set_ylabel("Specific Range [km/kgf]")
+        ax2.plot(test_velocities, ld, label="Lift/Drag Ratio")
+        ax2.set_ylabel("Lift / Drag Ratio")
 
         fig.legend(loc="upper left")
         ax1.grid()
@@ -224,12 +230,14 @@ class Interface():
 
     def plot_nfs_to_dvr(self):
         gross = self.ui.grossSpinner.value()
-        self.rotor.hover(gross)
+        flat_plate_area = self.ui.fpaSpinner.value()
+        density = self.ui.densitySpinner.value()
 
+        self.rotor.hover(gross)
         velocities = np.linspace(0, 50, 50)
         downwash_velocity_ratios = np.zeros((50))
         for i, velocity in enumerate(velocities):
-            self.rotor.forward_flight(velocity)
+            self.rotor.forward_flight(velocity, density, flat_plate_area)
             downwash_velocity_ratios[i] = self.rotor.downwash_velocity_ratio
         normalized_flight_speeds = velocities / self.rotor.hover_induced_vel
 
@@ -263,21 +271,23 @@ class Interface():
     
     def plot_range_electric(self):
         gross = self.ui.grossSpinner.value()
-        transmission_loss = 1 + self.ui.transmissionLossSpinner.value()
+        transmission_loss = self.ui.transmissionLossSpinner.value()
         battery_capacity = self.ui.batteryCapSpinner.value()
+        flat_plate_area = self.ui.fpaSpinner.value()
+        density = self.ui.densitySpinner.value()
 
         self.rotor.hover(gross)
         test_velocities = np.linspace(10,80, 50)
         total_powers = np.zeros((50))
 
         for i, vel in enumerate(test_velocities):
-            self.rotor.forward_flight(vel)
+            self.rotor.forward_flight(vel, density, flat_plate_area)
             total_powers[i] = self.rotor.power_total
         total_powers /= 1000
-        total_powers *= transmission_loss
+        motor_powers = 1.13 * total_powers.copy() / (1 - transmission_loss)
         test_velocities *= 3.6
 
-        endurance = battery_capacity / total_powers
+        endurance = battery_capacity / motor_powers
         range = endurance * test_velocities
 
         fig, ax1 = plt.subplots()
