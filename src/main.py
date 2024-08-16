@@ -9,17 +9,13 @@ from gui.interface import Interface
 
 def main():
     app = QtWidgets.QApplication(sys.argv)
-    pycopter = QtWidgets.QMainWindow()
+    main_window = QtWidgets.QMainWindow()
     ui = Ui_pycopter()
-    ui.setupUi(pycopter)
-    pycopter.show()
+    ui.setupUi(main_window)
+    main_window.show()
 
-    interface = Interface(ui)
+    interface = Interface(ui, main_window)
 
-    # rotor = Rotor("naca0012", 2, .53, 14.63, .6, -4, 0.01, False)
-    # rotor.hover(4300)
-    
-    # rotor.forward_flight(20)
     sys.exit(app.exec_())
     
 

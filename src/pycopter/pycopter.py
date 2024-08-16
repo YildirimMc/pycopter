@@ -7,9 +7,41 @@ from .utils import *
 
 class Rotor():
     """
-    Default values for Mil Mi-8.
+    A class simulating a rotor performance in hover and forward flight conditions. This class allows 
+    the user to initialize a rotor with specific parameters and provides methods for simulating its performance.
+
+    Methods
+    -------
+    hover(weight: int, density: float, n: int) -> None
+        Calculates the hover performance and stores it in class variables.
+    forward_flight(velocity: int/float, density: float, flat_plate_area: float) -> None
+        Calculates the forward flight performance and stores it in class variables. Function 'hover' must be called before.
+    ige(thrust: float, rotor_height: float) -> float
+        Returns the hover thrust in ground effect.   
     """
-    def __init__(self, airfoil="naca23012", num_blades=5, chord=0.52, rotor_diameter=21.29, tip_speed_mach=0.624, washout=-8, rotor_root_cutout=0.01, new_polar=True): # new_polar only for debug. # TODO: Add spellchecking for airfoil.
+    def __init__(self, airfoil="naca23012", num_blades=5, chord=0.52, rotor_diameter=21.29, tip_speed_mach=0.624, washout=-8, rotor_root_cutout=0.01, new_polar=True):
+        """
+        Initializes the Rotor class with the given configuration. Default values are for the rotor of a Mil Mi-8 helicopter.
+
+        Parameters
+        ----------
+        airfoil : str
+            Airfoil name. Only naca profiles are available. E.g. 'naca0012'.
+        num_blades : int
+            Number of blades in rotor.
+        chord : float [m]
+            Chord length of a blade.
+        rotor_diameter : float [m]
+            Rotor disk diameter
+        tip_speed_mach : float
+            Rotor/blade tip speed in mach. E.g. '0.6'.
+        washout : float [°]
+            Blade root to tip twist in degrees.
+        rotor_root_cutout : float
+            Ratio of rotor disk middle hole area to rotor disk area. Also the same as the ratio of rotorhead/pylon diameter to rotor diameter.   
+        new_polar : bool
+            Whether to request new polars from Xfoil.
+        """
         self.airfoil = airfoil
         self.num_blades = num_blades
         self.chord = chord
@@ -56,10 +88,38 @@ class Rotor():
 
         print("T&HP:", self.thrust, self.horsepower, "Coefs:", self.ct, self.cp, self.cq, "Merits:", self.M, self.M_actual, self.FMR, "B =", self.tip_loss_2)"""
     
-    def ige(self, thrust, rotor_height): # In Ground Effect
+    def ige(self, thrust:float, rotor_height:float): # In Ground Effect
+        """
+        Returns the thrust in ground effect.
+
+        Parameters
+        ----------
+        thrust : float [N or kg]
+            Rotor thrust out of ground effect.
+        rotor_height : float [m]
+            Rotor disk height from ground/obstacle below.
+        
+        Returns
+        -------
+        float
+            New thrust amplified by the ground effect.
+        """
         return thrust / (1 - (self.r**2 / (16 * rotor_height**2)))
 
     def hover(self, weight=13000, density=1.225, n=10): 
+        """
+        Calculates the hover performance of the initialized rotor. Finds the minimum blade collective 
+        pitch angle that can lift the specified weight and calculates the remaining parameters with that angle.  
+
+        Parameters
+        ----------
+        weight : int [kg]
+            Weight of the entire aircraft. Or only of the rotor if the user desires.
+        density : float [kg/m3]
+            Density of air.
+        n : int
+            Blade element theory resolution.
+        """
         weight *= 9.81
         print("\nCalculating Hover Conditions...")
         self.is_hovered = True
@@ -126,6 +186,18 @@ class Rotor():
         print("Coeffs:", self.ct, self.cp, "| Merits:", self.merit, self.merit_max, self.merit / self.merit_max, "| Tip Loss:", self.tip_loss)
 
     def forward_flight(self, velocity, density=1.225, flat_plate_area=3.5):
+        """
+        Calculates the forward flight performance of the initialized rotor according to hover conditions.  
+
+        Parameters
+        ----------
+        velocity : int/float [m/s]
+            Level forward flight velocity.
+        density : float [kg/m3]
+            Density of air.
+        flat_plate_area : float [m2]
+            Equivalent flat plate area of the aircraft body. Used for calculating the parasite drag.
+        """
         if not (isinstance(velocity, float) or isinstance(velocity, int)):
             raise ValueError("Forward flight velocity must be a numeric singleton.")
         if not self.is_hovered: 

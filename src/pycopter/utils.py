@@ -23,7 +23,8 @@ def find_interval_idx(array, val):
         return idx
 
 def interpolate(val, x1, x2, y1, y2):
-    # Deprecated. Using numpy in the future.
+    # Deprecated. Using scipy in the future.
+    """2D interpolation."""
     slope = (y2 - y1) / (x2 - x1)
     return (val - x1) * slope + y1
 
@@ -36,12 +37,12 @@ def read_txt(filepath):
             data[i] = line.split(" ")
         return data
     
-def probe_txt(filepath, x):
-    """Returns the value interpolated from the data in the filepath."""
+def probe_txt(filepath, value):
+    """Returns the value interpolated from the data in the given filepath."""
     data = read_txt(filepath)
-    idx = find_interval_idx(data, x)
+    idx = find_interval_idx(data, value)
     slope = (data[idx+1][1] - data[idx][1]) / (data[idx+1][0] - data[idx][0])
-    probe = (x - data[idx][0]) * slope + data[idx][1] 
+    probe = (value - data[idx][0]) * slope + data[idx][1] 
     return probe
     
 def reynolds(velocity, ch_len, kin_vis):
@@ -50,25 +51,44 @@ def reynolds(velocity, ch_len, kin_vis):
 
 class Polar():
     """
-    A class to interface between the main program and the xfoil.py
+    A class to interface between the main program and the xfoil.py. 
+    Requests new polar data with the given parameters or reads an existing one on initialization.
 
-    Functions
-    ---------
+    Methods
+    -------
+    get_polar(alfa: float) -> float, float
+        Returns the cl, cd values of the airfoil for the given alfa.
+    get_cl_slope() -> float
+        Returns the cl/alfa slope of the airfoil around alfa=1°.
     """
     def __init__(self, airfoil, mach, reynolds, new_polar=True):
-        xfoil = Xfoil(airfoil, new_polar)
+        """
+        Initializes the Polar class. The parameters are used to create polar data from Xfoil.
+
+        Parameters
+        ----------
+        airfoil : str
+            Airfoil name. Only naca profiles are available. E.g. 'naca0012'.
+        mach : float
+            Mach speed of the airfoil.
+        reynolds : float
+            Reynolds number of the flow around the airfoil.
+        new_polar : bool
+            Whether to request new polar data or use the existing one.
+        """
+        xfoil = Xfoil(new_polar)
         if new_polar:
             print("Generating XFOIL polar...")
-            xfoil.simulate(mach, reynolds)
+            xfoil.simulate(airfoil, mach, reynolds)
         try:
             self.polar = xfoil.read_polar()
         except FileNotFoundError:
             print("Polar data not found. Generating new XFOIL polar...")
-            xfoil.simulate(mach, reynolds)
+            xfoil.simulate(airfoil, mach, reynolds)
             self.polar = xfoil.read_polar()
 
     def get_polar(self, alfa):
-        """Returns (cl, cd) values for the requested angle of attack."""
+        """Returns (cl, cd) values for the requested angle of attack in degrees."""
         func = interp1d(self.polar[:,0], [self.polar[:,1], self.polar[:,2]], kind='linear', axis=1)
         cl, cd = func(alfa)
         return cl, cd
@@ -77,8 +97,9 @@ class Polar():
         """Returns the initial slope[1/rad] of the cl vs alfa curve."""
         return (self.polar[2,1] - self.polar[0,1]) / (np.deg2rad(self.polar[2,0]) - np.deg2rad(self.polar[0,0]))
     
-def get_flat_plate_area(helicopter="mi-8"): # Possible carry into the Body class in the future.
-        """    """
+def get_flat_plate_area(helicopter="mi-8"):
+        # Deprecated. User enters fpa in GUI.
+        """Reads and returns the flat plate area from database."""
         fpa_dict = {}
         with open("data/flat_plate_areas.txt", "r") as file:
             for line in file:
@@ -94,37 +115,75 @@ def get_flat_plate_area(helicopter="mi-8"): # Possible carry into the Body class
             sys.exit(1)
         return fpa
 
-def calculate_flat_plate_area(image_path, width, height, body_cd): # TODO: Saves the calculated value to database.
+def calculate_component_reference_area(image_path:str, width:float, height:float):
     """
-    Returns the flat_plate_area. Image must be an orthogonal picture with a black object and a white background. See examples in data/cra_images/.
-    Save the value to 'data/flat_plate_areas.txt' for future use and use 'get_flat_plate_area()'.
+    Calculates the component reference area of the aircraft's body. Image must be an orthogonal picture with the object in black and the background in white. 
+    See examples in data/cra_images/. Required for calculating the flat plate area.
 
-    Arguments
+    Parameters
     ---------
-    image_path (str): Filepath of the image.
-    height (float): Height of the image in meters.
-    width (float): Width of the image in meters.
-    body_cd (float): Rotorless body drag coefficient.
+    image_path : str
+        Filepath of the image.
+    height : float
+        Height of the image in meters.
+    width : float
+        Width of the image in meters.
     """
     image = Image.open(image_path).convert("1")
     pixels = image.getdata()
     black_pixels = sum([1 for pixel in pixels if pixel == 0])
     ratio = black_pixels / len(pixels)
     component_reference_area = ratio * height * width
-    return component_reference_area * body_cd
+    return component_reference_area
 
-def walds_equation(normalized_flight_speed, downwash_velocity_ratio, alfa):
+def walds_equation(normalized_flight_speed:float, downwash_velocity_ratio:float, alfa=0):
+    """
+    Wald's Equation as defined in ref: 'AMCP 706-201, pdf pg.92'.
+    
+    Parameters
+    ----------
+    normalized_flight_speed : float
+        Forward flight speed divided by hover induced velocity. [V/v0]
+    downwash_velocity_ratio : float
+        Forward flight induced velocity divided by hover induced velocity. [v/v0]
+    alfa : float [°]
+        Rotor collective pitch. Assume 0° for level forward flight.
+
+    Returns
+    -------
+    float
+        Result of the Wald's Equation. Must equal to 1.
+    """
     output = downwash_velocity_ratio**4 - 2 * downwash_velocity_ratio**3 * normalized_flight_speed * np.sin(np.deg2rad(alfa)) \
             + normalized_flight_speed**2 * downwash_velocity_ratio**2
     return output
 
-def walds_solver(free_stream_velocity, hover_induced_velocity, alfa, iter=100):
+def walds_solver(free_stream_velocity:float, hover_induced_velocity:float, alfa=0, iter=100):
+    """
+    Numerically solves the Wald's Equation and returns the downwash velocity ratio [v/v0].
+    
+    Parameters
+    ----------
+    free_stream_velocity : float [m/s]
+        Also known as forward flight speed. Is the level velocity of the aircraft.
+    hover_induced_velocity : float [m/s]
+        Mean axial velocity of the air molecules being pushed down by the rotor at the rotor disk plane in hover.
+    alfa : float [°]
+        Rotor collective pitch. Assume 0° for level forward flight.
+    iter : int
+        Iterations if the solver. The solver doesn't have a convergence criteria but it usually converges after around 10 iterations.
+
+    Returns
+    -------
+    float
+        The downwash velocity ratio. Forward flight induced velocity divided by hover induced velocity. [v/v0]
+    """    
     normalized_flight_speed = free_stream_velocity / hover_induced_velocity
     downwash_velocity_ratio = 1 # Initialization.
     gamma = 0.02 # Step size.
     target = 1
 
-    for _ in range(100):
+    for _ in range(iter):
         output = walds_equation(normalized_flight_speed, downwash_velocity_ratio, alfa)
         downwash_velocity_ratio -= (output - target) * gamma
 
