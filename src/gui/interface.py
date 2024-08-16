@@ -5,21 +5,30 @@ from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 import matplotlib.pyplot as plt
 import numpy as np
+import json
 
-from PyQt5.QtWidgets import QVBoxLayout
+from PyQt5.QtWidgets import QMainWindow, QVBoxLayout, QFileDialog
 
 class MplCanvas(FigureCanvasQTAgg):
+    """Used for drawing figures in the dedicated area in pycopter GUI."""
     def __init__(self, figure):
         super().__init__(figure)
 
 class Interface():
-    def __init__(self, ui: Ui_pycopter):
+    """This class defines the functionalities of the pycopter's main window."""
+    def __init__(self, ui: Ui_pycopter, main_window: QMainWindow):
         self.ui = ui
+        self.main_window = main_window
 
         self.ui.initRotorBtn.clicked.connect(self.init_rotor)
         self.ui.calcHoverBtn.clicked.connect(self.calculate_hover)
         self.ui.calcForwardFlightBtn.clicked.connect(self.calculate_forward_flight)
         self.ui.generatePlotBtn.clicked.connect(self.generate_plot)
+        self.ui.actionNew.triggered.connect(self.action_new)
+        self.ui.actionSave.triggered.connect(self.action_save)
+        self.ui.actionSaveAs.triggered.connect(self.action_save_as)
+        self.ui.actionLoad.triggered.connect(self.action_load)
+        self.ui.actionClear_outputs.triggered.connect(self.action_clear_outputs)
 
         self.mpl_layout = QVBoxLayout()
         self.ui.mpl_widget.setLayout(self.mpl_layout)
@@ -31,11 +40,32 @@ class Interface():
                            "Ground Effect vs. Height": self.plot_ground_effect,
                            "Electric Range vs. Velocity": self.plot_range_electric,
                            "Forward Flight Powers vs. Velocity": self.plot_powers_vs_velocity}
+        
+        self.spinners_dict = {"airfoil": self.ui.airfoilText,
+                              "num_blades": self.ui.numBladesSpin,
+                              "chord": self.ui.bladeChordSpin,
+                              "rotor_diam": self.ui.rotorDiameterSpin,
+                              "tip_speed_mach": self.ui.tipSpeedMachSpin,
+                              "washout": self.ui.washoutSpinner,
+                              "root_cutout": self.ui.rotorRootCutoutSpinner,
+                              "gross": self.ui.grossSpinner,
+                              "density": self.ui.densitySpinner,
+                              "transmission_loss": self.ui.transmissionLossSpinner,
+                              "fuel_cap": self.ui.fuelCapSpinner,
+                              "sfc": self.ui.sfcSpinner,
+                              "battery_cap": self.ui.batteryCapSpinner,
+                              "velocity": self.ui.velocitySpinner,
+                              "fpa": self.ui.fpaSpinner,
+                              "output": self.ui.textOutputWidget}
+        
+        self.save_path = ""
 
     def print(self, text):
+        """Prints text into the dedicated area in GUI."""
         self.ui.textOutputWidget.appendPlainText(text)
 
     def init_rotor(self):
+        """Implements the functionality of the 'Init Rotor' button."""
         airfoil = self.ui.airfoilText.toPlainText().lower()
         num_blades = self.ui.numBladesSpin.value()
         chord = self.ui.bladeChordSpin.value()
@@ -58,19 +88,21 @@ class Interface():
         self.ui.generatePlotBtn.setEnabled(True)
         
     def calculate_hover(self):
+        """'Calculate Hover' button."""
         gross = self.ui.grossSpinner.value()
         density = self.ui.densitySpinner.value()
 
         self.print("\nCalculating Hover Conditions...")
         self.rotor.hover(gross, density)
-        self.print(f"Theta = {self.rotor.theta}° | Induced Velocity= {self.rotor.hover_induced_vel}[m/s] | Thrust = {self.rotor.hover_thrust/9.81}[kg]")
-        self.print(f"SHP Induced: {self.rotor.hover_power_induced*0.00134102209} | SHP Profile: {self.rotor.hover_power_profile*0.00134102209} | SHP Total: {self.rotor.hover_power_total*0.00134102209}")
+        self.print(f"Theta = {self.rotor.theta}° | Induced Velocity= {self.rotor.hover_induced_vel:.3f}[m/s] | Thrust = {self.rotor.hover_thrust/9.81:.3f}[kg]")
+        self.print(f"SHP Induced: {self.rotor.hover_power_induced*0.00134102209:.3f} | SHP Profile: {self.rotor.hover_power_profile*0.00134102209:.3f} | SHP Total: {self.rotor.hover_power_total*0.00134102209:.3f} | BHP: {self.rotor.hover_power_total*0.00134102209/self.ui.transmissionLossSpinner.value():.3f}")
         self.print(f"Coeffs: {self.rotor.ct}, {self.rotor.cp} | Merits: {self.rotor.merit}, {self.rotor.merit_max}, {self.rotor.merit / self.rotor.merit_max} | Tip Loss: {self.rotor.tip_loss}")
         self.print(f"Thrust in ground effect at 10 meters = {self.rotor.ige(self.rotor.hover_thrust, 10)/9.81} [kg]")
 
         self.ui.calcForwardFlightBtn.setEnabled(True)
 
     def calculate_forward_flight(self):
+        """'Calculate Forward Flight' button."""
         velocity = self.ui.velocitySpinner.value() / 3.6 # Converting to m/s
         density = self.ui.densitySpinner.value() 
         flat_plate_area = self.ui.fpaSpinner.value()
@@ -80,7 +112,79 @@ class Interface():
         self.print(f"Alfa: {self.rotor.alfa} | Downwash Velocity Ratio: {self.rotor.downwash_velocity_ratio} | Check if {self.rotor.power_profile/(2*density*self.rotor.rotor_disk_area*self.rotor.r)} is smaller than {velocity**2 / 2} for horsepowers below.")
         self.print(f"SHP Induced: {self.rotor.power_induced*0.00134102209} | SHP Profile:  {self.rotor.power_profile*0.00134102209} | SHP Parasite: {self.rotor.power_parasite*0.00134102209} | HP Total: {self.rotor.horsepower_total}")
         
+    def action_new(self):
+        """'File' -> 'New' functionality."""
+        for key, value in self.spinners_dict.items():
+            value.clear() # Soft reference! Careful!
+
+    def action_save(self):
+        """'File' -> 'Save' functionality."""
+        with open(self.save_path, 'w') as file:
+            configuration_dict = {}
+            for key, value in self.spinners_dict.items():
+                if key == "airfoil" or key == "output":
+                    configuration_dict[key] = value.toPlainText().lower()
+                else:
+                    configuration_dict[key] = value.value()
+            json.dump(configuration_dict, file, indent=4)
+        self.print(f"Configuration saved to: {self.save_path}\n")
+
+    def action_save_as(self):
+        """'File' -> 'Save As' functionality."""
+        options = QFileDialog.Options()
+        file_path, _ = QFileDialog.getSaveFileName(
+            self.main_window,
+            "Save configuration...",
+            "pycopter",
+            "JSON Files (*.json);;All Files (*)",
+            options=options
+        )
+        
+        # Saving the file if the user selects one
+        if file_path:
+            with open(file_path, 'w') as file:
+                configuration_dict = {}
+                for key, value in self.spinners_dict.items():
+                    if key == "airfoil" or key == "output":
+                        configuration_dict[key] = value.toPlainText().lower()
+                    else:
+                        configuration_dict[key] = value.value()
+                json.dump(configuration_dict, file, indent=4)
+            self.print(f"Configuration saved to: {file_path}\n")
+            self.save_path = file_path
+            self.ui.actionSave.setEnabled(True)
+        else:
+            self.print("No file selected.\n")
+
+    def action_load(self):
+        """'File' -> 'Load' functionality."""
+        options = QFileDialog.Options()
+        file_path, _ = QFileDialog.getOpenFileName(
+            self.main_window,
+            "Load configuration...",
+            "",
+            "JSON Files (*.json);;All Files (*)",
+            options=options
+        )
+        
+        # Loading the file if the user selects one
+        if file_path:
+            with open(file_path, 'r') as file:
+                configuration_dict = json.load(file)
+            for key, value in configuration_dict.items():
+                if key == "airfoil" or key == "output":
+                    self.spinners_dict[key].setPlainText(value)
+                else:
+                    self.spinners_dict[key].setValue(value)
+            self.print(f"Configuration loaded.\n")
+        else:
+            self.print("No file selected.\n")
+
+    def action_clear_outputs(self):
+        self.ui.textOutputWidget.clear()
+        
     def generate_plot(self):
+        """'Generate Plot' button."""
         fig = self.plots_dict[self.ui.selectedPlotCombo.currentText()]()
         canvas = FigureCanvasQTAgg(fig)
         
@@ -89,11 +193,14 @@ class Interface():
         self.mpl_layout.addWidget(canvas)
         
     ##################### PLOT FUNCTIONS #####################
+    """Plot functions calculate the data, create the figure, and return it to 'Generate Plot' function above."""
 
     def plot_powers_vs_velocity(self):
+        """Creates the plot and returns the figure to 'Generate Plot' function."""
         gross = self.ui.grossSpinner.value()
         flat_plate_area = self.ui.fpaSpinner.value()
         density = self.ui.densitySpinner.value()
+        self.ui.textOutputWidget.setPlainText
 
         self.rotor.hover(gross)
         test_velocities = np.linspace(10,80, 50)
