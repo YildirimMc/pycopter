@@ -23,14 +23,14 @@ class Xfoil():
         new_polar : bool
             Whether to request new polars or use an existing one.
         """
+        self.new_polar = new_polar
         self.exe_path = "data/XFOIL6.99/xfoil.exe"
         self.output_path = "data/XFOIL6.99/polar.txt"
         self.max_theta = 15
         
         self.process = subprocess.Popen(self.exe_path, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.PIPE, text=True)
 
-        if new_polar and os.path.exists(self.output_path):
-            os.remove(self.output_path) 
+        
         
     def simulate(self, airfoil:str, mach:float, reynolds:float):
         """
@@ -45,6 +45,9 @@ class Xfoil():
         reynolds : float
             The Reynold's number.
         """
+        if self.new_polar and os.path.exists(self.output_path):
+            os.remove(self.output_path) 
+
         inputs_init = [airfoil, "oper", "iter 400", "v", str(reynolds), f"mach {mach}", "pacc", self.output_path + "\n"]
         inputs = [f"alfa {alfa}" for alfa in np.arange(-8, self.max_theta + 6)]
         command = ""
@@ -61,11 +64,8 @@ class Xfoil():
 
     def read_polar(self):
         """Reads and returns the polar data[ndarray] that was created by XFOIL.exe."""
-        try: 
-            np.genfromtxt(self.output_path, skip_header=12)
-        except FileNotFoundError:
-            print("No polar data was found. Please call the 'simulate' method prior to calling this.")
-            raise
+        return np.genfromtxt(self.output_path, skip_header=12)
+
 
 
 if __name__ == "__main__":

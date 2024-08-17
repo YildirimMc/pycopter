@@ -1,4 +1,5 @@
 from .pycopterui import Ui_pycopter
+from .input_checker import InputChecker 
 from pycopter import Rotor
 
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
@@ -6,6 +7,7 @@ from matplotlib.figure import Figure
 import matplotlib.pyplot as plt
 import numpy as np
 import json
+import os
 
 from PyQt5.QtWidgets import QMainWindow, QVBoxLayout, QFileDialog
 
@@ -28,10 +30,12 @@ class Interface():
         self.ui.actionSave.triggered.connect(self.action_save)
         self.ui.actionSaveAs.triggered.connect(self.action_save_as)
         self.ui.actionLoad.triggered.connect(self.action_load)
-        self.ui.actionClear_outputs.triggered.connect(self.action_clear_outputs)
+        self.ui.actionClearOutputs.triggered.connect(self.action_clear_outputs)
+        self.ui.actionSaveFigure.triggered.connect(self.action_save_figure)
 
         self.mpl_layout = QVBoxLayout()
         self.ui.mpl_widget.setLayout(self.mpl_layout)
+        self.input_checker = InputChecker(ui)
 
         self.plots_dict = {"Range, Endurance vs. Velocity": self.plot_range_endurance_vs_velocity, 
                            "Specific Range, LD vs. Velocity": self.plot_sr_ld_vs_velocity,
@@ -39,7 +43,8 @@ class Interface():
                            "Downwash Velocity Ratio vs. Normalized Flight Speed": self.plot_nfs_to_dvr,
                            "Ground Effect vs. Height": self.plot_ground_effect,
                            "Electric Range vs. Velocity": self.plot_range_electric,
-                           "Forward Flight Powers vs. Velocity": self.plot_powers_vs_velocity}
+                           "Forward Flight Powers vs. Velocity": self.plot_powers_vs_velocity,
+                           "Cl, Cd vs. Alfa": self.plot_alpha_cl_cd}
         
         self.spinners_dict = {"airfoil": self.ui.airfoilText,
                               "num_blades": self.ui.numBladesSpin,
@@ -58,12 +63,15 @@ class Interface():
                               "fpa": self.ui.fpaSpinner,
                               "output": self.ui.textOutputWidget}
         
+        # Placeholders
         self.save_path = ""
+        self.fig = None
 
     def print(self, text):
         """Prints text into the dedicated area in GUI."""
         self.ui.textOutputWidget.appendPlainText(text)
 
+    # Buttons
     def init_rotor(self):
         """Implements the functionality of the 'Init Rotor' button."""
         airfoil = self.ui.airfoilText.toPlainText().lower()
@@ -75,14 +83,14 @@ class Interface():
         rotor_root_cutout = self.ui.rotorRootCutoutSpinner.value()
         b_new_polars = self.ui.bNewPolars.isChecked() 
 
-        if airfoil[:4] != "naca": 
-            self.print("Airfoil must be a NACA profile.") 
+        if not self.input_checker.airfoil_checker():
+            self.print(self.input_checker.error_message)
             return
 
         self.print("Initializing rotor...")
         self.rotor = Rotor(airfoil, num_blades, chord, diameter, tip_speed_mach, 
                            washout, rotor_root_cutout, b_new_polars)
-        self.print(f"Tip Speed: {self.rotor.tip_speed} [m/s] | Rotor Disk Area: {self.rotor.rotor_disk_area} [m2] | Solidity: {self.rotor.solidity}")
+        self.print(f"Tip Speed: {self.rotor.tip_speed:.3f} [m/s] | Rotor Disk Area: {self.rotor.rotor_disk_area:.3f} [m2] | Solidity: {self.rotor.solidity:.3f}")
     
         self.ui.calcHoverBtn.setEnabled(True)
         self.ui.generatePlotBtn.setEnabled(True)
@@ -92,12 +100,13 @@ class Interface():
         gross = self.ui.grossSpinner.value()
         density = self.ui.densitySpinner.value()
 
-        self.print("\nCalculating Hover Conditions...")
         self.rotor.hover(gross, density)
+        bhp = self.rotor.hover_power_total*0.00134102209 / (1 - self.ui.transmissionLossSpinner.value())
+        self.print("\nCalculating Hover Conditions...")
         self.print(f"Theta = {self.rotor.theta}° | Induced Velocity= {self.rotor.hover_induced_vel:.3f}[m/s] | Thrust = {self.rotor.hover_thrust/9.81:.3f}[kg]")
-        self.print(f"SHP Induced: {self.rotor.hover_power_induced*0.00134102209:.3f} | SHP Profile: {self.rotor.hover_power_profile*0.00134102209:.3f} | SHP Total: {self.rotor.hover_power_total*0.00134102209:.3f} | BHP: {self.rotor.hover_power_total*0.00134102209/self.ui.transmissionLossSpinner.value():.3f}")
-        self.print(f"Coeffs: {self.rotor.ct}, {self.rotor.cp} | Merits: {self.rotor.merit}, {self.rotor.merit_max}, {self.rotor.merit / self.rotor.merit_max} | Tip Loss: {self.rotor.tip_loss}")
-        self.print(f"Thrust in ground effect at 10 meters = {self.rotor.ige(self.rotor.hover_thrust, 10)/9.81} [kg]")
+        self.print(f"SHP Induced: {self.rotor.hover_power_induced*0.00134102209:.3f} | SHP Profile: {self.rotor.hover_power_profile*0.00134102209:.3f} | SHP Total: {self.rotor.hover_power_total*0.00134102209:.3f} | BHP: {bhp:.3f}")
+        self.print(f"Coeffs: {self.rotor.ct:.3f}, {self.rotor.cp:.3f} | Merit: {self.rotor.merit:.3f} | Merit Max: {self.rotor.merit_max:.3f} | Merits Ratio: {self.rotor.merit / self.rotor.merit_max:.3f} | Tip Loss: {self.rotor.tip_loss:.3f}")
+        self.print(f"Thrust in ground effect at 10 meters = {self.rotor.ige(self.rotor.hover_thrust, 10)/9.81:.3f} [kg]")
 
         self.ui.calcForwardFlightBtn.setEnabled(True)
 
@@ -107,11 +116,13 @@ class Interface():
         density = self.ui.densitySpinner.value() 
         flat_plate_area = self.ui.fpaSpinner.value()
 
-        self.print("\nCalculating Forward Flight Conditions...")
         self.rotor.forward_flight(velocity, density, flat_plate_area)
-        self.print(f"Alfa: {self.rotor.alfa} | Downwash Velocity Ratio: {self.rotor.downwash_velocity_ratio} | Check if {self.rotor.power_profile/(2*density*self.rotor.rotor_disk_area*self.rotor.r)} is smaller than {velocity**2 / 2} for horsepowers below.")
-        self.print(f"SHP Induced: {self.rotor.power_induced*0.00134102209} | SHP Profile:  {self.rotor.power_profile*0.00134102209} | SHP Parasite: {self.rotor.power_parasite*0.00134102209} | HP Total: {self.rotor.horsepower_total}")
+        bhp = self.rotor.horsepower_total / (1 - self.ui.transmissionLossSpinner.value())
+        self.print("\nCalculating Forward Flight Conditions...")
+        self.print(f"Alfa: {self.rotor.alfa} | Downwash Velocity Ratio: {self.rotor.downwash_velocity_ratio:.3f} | Check if {self.rotor.power_profile/(2*density*self.rotor.rotor_disk_area*self.rotor.r):.3f} is smaller than {velocity**2 / 2:.3f} for horsepowers below.")
+        self.print(f"SHP Induced: {self.rotor.power_induced*0.00134102209:.3f} | SHP Profile:  {self.rotor.power_profile*0.00134102209:.3f} | SHP Parasite: {self.rotor.power_parasite*0.00134102209:.3f} | HP Total: {self.rotor.horsepower_total:.3f} | BHP: {bhp:.3f}")
         
+    # Actions (E.g. File -> ...)
     def action_new(self):
         """'File' -> 'New' functionality."""
         for key, value in self.spinners_dict.items():
@@ -182,21 +193,38 @@ class Interface():
 
     def action_clear_outputs(self):
         self.ui.textOutputWidget.clear()
-        
+
+    def action_save_figure(self):
+        """'File' -> 'Save Figure' functionality."""
+        options = QFileDialog.Options()
+        file_path, _ = QFileDialog.getSaveFileName(
+            self.main_window,
+            "Save figure...",
+            f"{self.ui.selectedPlotCombo.currentText()}.png",
+            "PNG Files (*.png);;All Files (*)",
+            options=options
+        )
+        if self.fig is None:# TODO: Refactor save dialog to a dedicated function?
+            self.print("Save was unsuccessful!")
+        else:
+            self.fig.savefig(file_path)
+            self.print("Figure saved.")
+
     def generate_plot(self):
         """'Generate Plot' button."""
-        fig = self.plots_dict[self.ui.selectedPlotCombo.currentText()]()
-        canvas = FigureCanvasQTAgg(fig)
-        
+        self.fig = self.plots_dict[self.ui.selectedPlotCombo.currentText()]()
+        canvas = FigureCanvasQTAgg(self.fig)
+
         while self.mpl_layout.count():
             item = self.mpl_layout.takeAt(0)
         self.mpl_layout.addWidget(canvas)
+
+        self.ui.actionSaveFigure.setEnabled(True)
         
     ##################### PLOT FUNCTIONS #####################
-    """Plot functions calculate the data, create the figure, and return it to 'Generate Plot' function above."""
+    """All plot functions calculate the data, create the figure, and return it to 'Generate Plot' function above which adds them to GUI."""
 
     def plot_powers_vs_velocity(self):
-        """Creates the plot and returns the figure to 'Generate Plot' function."""
         gross = self.ui.grossSpinner.value()
         flat_plate_area = self.ui.fpaSpinner.value()
         density = self.ui.densitySpinner.value()
@@ -395,7 +423,7 @@ class Interface():
         test_velocities *= 3.6
 
         endurance = battery_capacity / motor_powers
-        range = endurance * test_velocities
+        flight_range = endurance * test_velocities
 
         fig, ax1 = plt.subplots()
         ax1.plot(test_velocities, endurance, label="Endurance")
@@ -404,9 +432,28 @@ class Interface():
         ax1.set_ylabel("Endurance [hr]")
 
         ax2 = ax1.twinx()
-        ax2.plot(test_velocities, range, label="Range", color="Orange")
+        ax2.plot(test_velocities, flight_range, label="Range", color="Orange")
         ax2.set_ylabel("Range [km]")
         ax1.grid()
         fig.legend()
+        return fig
+    
+    def plot_alpha_cl_cd(self):
+        alfa_arr = np.arange(-5, 20)
+        cl_cd_arr = np.empty((len(alfa_arr), 2))
+        for i, alfa in enumerate(alfa_arr):
+            cl_cd_arr[i] = self.rotor.polar.get_polar(alfa)
+        
+        fig, ax1 = plt.subplots()
+        ax1.plot(alfa_arr, cl_cd_arr[:,0], label="cl")
+        ax1.set_title(f"Cl Cd Slope, Re={self.rotor.polar.reynolds:.0f}")
+        ax1.set_xlabel("Angle of Attack [°]")
+        ax1.set_ylabel("Cl")
+
+        ax2 = ax1.twinx()
+        ax2.plot(alfa_arr, cl_cd_arr[:,1], label="cd", color="Orange")
+        ax2.set_ylabel("Cd [km]")
+        ax1.grid()
+        fig.legend(loc="upper left")
         return fig
         

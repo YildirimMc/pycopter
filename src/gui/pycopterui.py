@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-# Form implementation generated from reading ui file 'pyrotor.ui'
+# Form implementation generated from reading ui file 'pycopter.ui'
 #
 # Created by: PyQt5 UI code generator 5.15.9
 #
@@ -342,9 +342,10 @@ class Ui_pycopter(object):
         self.tabWidget.setTabShape(QtWidgets.QTabWidget.Rounded)
         self.tabWidget.setObjectName("tabWidget")
         self.TurboshaftTab = QtWidgets.QWidget()
+        self.TurboshaftTab.setMaximumSize(QtCore.QSize(1111111, 1111111))
         self.TurboshaftTab.setObjectName("TurboshaftTab")
         self.verticalLayoutWidget_2 = QtWidgets.QWidget(self.TurboshaftTab)
-        self.verticalLayoutWidget_2.setGeometry(QtCore.QRect(0, 0, 195, 81))
+        self.verticalLayoutWidget_2.setGeometry(QtCore.QRect(0, 0, 181, 81))
         self.verticalLayoutWidget_2.setObjectName("verticalLayoutWidget_2")
         self.verticalLayout_2 = QtWidgets.QVBoxLayout(self.verticalLayoutWidget_2)
         self.verticalLayout_2.setContentsMargins(0, 0, 0, 0)
@@ -514,6 +515,7 @@ class Ui_pycopter(object):
         self.selectedPlotCombo.addItem("")
         self.selectedPlotCombo.addItem("")
         self.selectedPlotCombo.addItem("")
+        self.selectedPlotCombo.addItem("")
         self.verticalLayout_3.addWidget(self.selectedPlotCombo)
         self.generatePlotBtn = QtWidgets.QPushButton(self.verticalLayoutWidget_3)
         self.generatePlotBtn.setEnabled(False)
@@ -544,16 +546,21 @@ class Ui_pycopter(object):
         self.actionSaveAs.setObjectName("actionSaveAs")
         self.actionNew = QtWidgets.QAction(pycopter)
         self.actionNew.setObjectName("actionNew")
-        self.actionClear_outputs = QtWidgets.QAction(pycopter)
-        self.actionClear_outputs.setObjectName("actionClear_outputs")
+        self.actionClearOutputs = QtWidgets.QAction(pycopter)
+        self.actionClearOutputs.setObjectName("actionClearOutputs")
         self.actionSave = QtWidgets.QAction(pycopter)
         self.actionSave.setEnabled(False)
         self.actionSave.setObjectName("actionSave")
+        self.actionSaveFigure = QtWidgets.QAction(pycopter)
+        self.actionSaveFigure.setEnabled(False)
+        self.actionSaveFigure.setObjectName("actionSaveFigure")
         self.menuTest.addAction(self.actionNew)
         self.menuTest.addAction(self.actionSave)
         self.menuTest.addAction(self.actionSaveAs)
         self.menuTest.addAction(self.actionLoad)
-        self.menuTest.addAction(self.actionClear_outputs)
+        self.menuTest.addSeparator()
+        self.menuTest.addAction(self.actionClearOutputs)
+        self.menuTest.addAction(self.actionSaveFigure)
         self.menubar.addAction(self.menuTest.menuAction())
 
         self.retranslateUi(pycopter)
@@ -597,13 +604,15 @@ class Ui_pycopter(object):
         self.selectedPlotCombo.setItemText(4, _translate("pycopter", "Downwash Velocity Ratio vs. Normalized Flight Speed"))
         self.selectedPlotCombo.setItemText(5, _translate("pycopter", "Ground Effect vs. Height"))
         self.selectedPlotCombo.setItemText(6, _translate("pycopter", "Electric Range vs. Velocity"))
+        self.selectedPlotCombo.setItemText(7, _translate("pycopter", "Cl, Cd vs. Alfa"))
         self.generatePlotBtn.setText(_translate("pycopter", "Generate Plot"))
         self.menuTest.setTitle(_translate("pycopter", "File"))
         self.actionLoad.setText(_translate("pycopter", "Load"))
         self.actionSaveAs.setText(_translate("pycopter", "Save As"))
         self.actionNew.setText(_translate("pycopter", "New"))
-        self.actionClear_outputs.setText(_translate("pycopter", "Clear outputs"))
+        self.actionClearOutputs.setText(_translate("pycopter", "Clear Outputs"))
         self.actionSave.setText(_translate("pycopter", "Save"))
+        self.actionSaveFigure.setText(_translate("pycopter", "Save Figure"))
 
 
 if __name__ == "__main__":

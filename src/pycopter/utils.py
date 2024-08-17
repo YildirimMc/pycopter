@@ -76,16 +76,20 @@ class Polar():
         new_polar : bool
             Whether to request new polar data or use the existing one.
         """
+        self.reynolds = reynolds
+
         xfoil = Xfoil(new_polar)
         if new_polar:
             print("Generating XFOIL polar...")
             xfoil.simulate(airfoil, mach, reynolds)
-        try:
             self.polar = xfoil.read_polar()
-        except FileNotFoundError:
-            print("Polar data not found. Generating new XFOIL polar...")
-            xfoil.simulate(airfoil, mach, reynolds)
-            self.polar = xfoil.read_polar()
+        else:
+            try:
+                self.polar = xfoil.read_polar()
+            except FileNotFoundError:
+                print("Polar data not found. Generating new XFOIL polar...")
+                xfoil.simulate(airfoil, mach, reynolds)
+                self.polar = xfoil.read_polar()
 
     def get_polar(self, alfa):
         """Returns (cl, cd) values for the requested angle of attack in degrees."""
