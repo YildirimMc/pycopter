@@ -1,4 +1,4 @@
-from .pyrotorui import Ui_pycopter
+from .pycopterui import Ui_pycopter
 from pycopter import Rotor
 
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg

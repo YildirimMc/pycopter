@@ -1,1 +1,1 @@
-from .pyrotorui import Ui_pycopter 
+from .pycopterui import Ui_pycopter 
