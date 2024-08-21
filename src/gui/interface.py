@@ -71,7 +71,8 @@ class Interface():
         """Prints text into the dedicated area in GUI."""
         self.ui.textOutputWidget.appendPlainText(text)
 
-    # Buttons
+    ##################### BUTTONS #####################
+
     def init_rotor(self):
         """Implements the functionality of the 'Init Rotor' button."""
         airfoil = self.ui.airfoilText.toPlainText().lower()
@@ -121,8 +122,9 @@ class Interface():
         self.print("\nCalculating Forward Flight Conditions...")
         self.print(f"Alfa: {self.rotor.alfa} | Downwash Velocity Ratio: {self.rotor.downwash_velocity_ratio:.3f} | Check if {self.rotor.power_profile/(2*density*self.rotor.rotor_disk_area*self.rotor.r):.3f} is smaller than {velocity**2 / 2:.3f} for horsepowers below.")
         self.print(f"SHP Induced: {self.rotor.power_induced*0.00134102209:.3f} | SHP Profile:  {self.rotor.power_profile*0.00134102209:.3f} | SHP Parasite: {self.rotor.power_parasite*0.00134102209:.3f} | HP Total: {self.rotor.horsepower_total:.3f} | BHP: {bhp:.3f}")
-        
-    # Actions (E.g. File -> ...)
+    
+    ##################### ACTIONS (File -> ...) #####################
+
     def action_new(self):
         """'File' -> 'New' functionality."""
         for key, value in self.spinners_dict.items():
@@ -190,6 +192,10 @@ class Interface():
             self.print(f"Configuration loaded.\n")
         else:
             self.print("No file selected.\n")
+
+        self.ui.calcHoverBtn.setEnabled(False)
+        self.ui.calcForwardFlightBtn.setEnabled(False)
+        self.ui.generatePlotBtn.setEnabled(False)
 
     def action_clear_outputs(self):
         self.ui.textOutputWidget.clear()
@@ -439,6 +445,8 @@ class Interface():
         return fig
     
     def plot_alpha_cl_cd(self):
+        airfoil = self.ui.airfoilText.toPlainText().lower()
+        
         alfa_arr = np.arange(-5, 20)
         cl_cd_arr = np.empty((len(alfa_arr), 2))
         for i, alfa in enumerate(alfa_arr):
@@ -446,7 +454,7 @@ class Interface():
         
         fig, ax1 = plt.subplots()
         ax1.plot(alfa_arr, cl_cd_arr[:,0], label="cl")
-        ax1.set_title(f"Cl Cd Slope, Re={self.rotor.polar.reynolds:.0f}")
+        ax1.set_title(f"{airfoil}, Cl Cd Slope, Re={self.rotor.polar.reynolds:.0f}")
         ax1.set_xlabel("Angle of Attack [°]")
         ax1.set_ylabel("Cl")
 

@@ -27,6 +27,7 @@ Features
 --------
 
 * TODO
+The GUI and the main module will be separated in the future and GUI will only be available in releases.
 
 Credits
 -------
