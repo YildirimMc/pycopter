@@ -1,0 +1,18 @@
+{
+    "airfoil": "naca0012",
+    "num_blades": 4,
+    "chord": 0.53,
+    "rotor_diam": 16.36,
+    "tip_speed_mach": 0.644,
+    "washout": -15.0,
+    "root_cutout": 0.025,
+    "gross": 10660,
+    "density": 1.225,
+    "transmission_loss": 0.11,
+    "fuel_cap": 4283,
+    "sfc": 0.28,
+    "battery_cap": 1500,
+    "velocity": 100.0,
+    "fpa": 3.5,
+    "output": "initializing rotor...\ntip speed: 214.032 [m/s] | rotor disk area: 355.850 [m2] | solidity: 0.079\nconfiguration loaded.\n\ninitializing rotor...\ntip speed: 214.032 [m/s] | rotor disk area: 355.850 [m2] | solidity: 0.079\ninitializing rotor...\ntip speed: 220.892 [m/s] | rotor disk area: 210.080 [m2] | solidity: 0.082\ninitializing rotor...\ntip speed: 220.892 [m/s] | rotor disk area: 210.080 [m2] | solidity: 0.082"
+}

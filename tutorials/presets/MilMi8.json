@@ -1,0 +1,18 @@
+{
+    "airfoil": "naca23012",
+    "num_blades": 5,
+    "chord": 0.53,
+    "rotor_diam": 21.29,
+    "tip_speed_mach": 0.624,
+    "washout": -8.0,
+    "root_cutout": 0.02,
+    "gross": 12000,
+    "density": 1.225,
+    "transmission_loss": 0.12,
+    "fuel_cap": 1929,
+    "sfc": 0.3,
+    "battery_cap": 1500,
+    "velocity": 100.0,
+    "fpa": 3.5,
+    "output": "initializing rotor...\ntip speed: 214.032 [m/s] | rotor disk area: 355.850 [m2] | solidity: 0.079"
+}

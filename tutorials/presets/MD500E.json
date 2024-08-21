@@ -1,0 +1,18 @@
+{
+    "airfoil": "naca0015",
+    "num_blades": 5,
+    "chord": 0.17,
+    "rotor_diam": 8.05,
+    "tip_speed_mach": 0.604,
+    "washout": -9.0,
+    "root_cutout": 0.032,
+    "gross": 1361,
+    "density": 1.225,
+    "transmission_loss": 0.11,
+    "fuel_cap": 175,
+    "sfc": 0.424,
+    "battery_cap": 1500,
+    "velocity": 100.0,
+    "fpa": 0.557,
+    "output": "initializing rotor...\ntip speed: 214.032 [m/s] | rotor disk area: 355.850 [m2] | solidity: 0.079\nconfiguration saved to: c:/users/54meh/desktop/milmi8.json\n\ninitializing rotor...\ntip speed: 207.172 [m/s] | rotor disk area: 50.844 [m2] | solidity: 0.067\nconfiguration saved to: c:/users/54meh/desktop/uni/sustainablecompeng/project/pycopter/md500e.json\n\nno file selected.\n"
+}
