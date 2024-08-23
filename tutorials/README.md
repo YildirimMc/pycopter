@@ -1,9 +1,3 @@
-## Getting Started
-
-This program is used to approximate final performance characteristics of a rotor design. Basic mathematical methodoliges such as *blade element theory* and *momentum theory* are used. Numerical simplicity of the algorithm allows the user to quickly assess the rotor. The outputs of the program are easy enough to be interpretable by anyone, as well as sophisticated enough for the experienced users.
-
-Program uses *XFOIL* (link here) to generate polar data for the given profile instead of keeping a polar database. Users also can use their own polar data.
-
 ## Tutorial
 
 #### Start the Graphical User Interface
@@ -45,8 +39,11 @@ For Range
 
 #### Plots
 
-A very useful aspect of the program is the *Plots* section. Simply select the desired plot and generate. 
+A very useful aspect of the program is the *Plots* section. Simply select the desired plot and click generate. 
 
 ## Results Verification
 
-To be implemented.
+Tutorials include save files and the resulting range plots for 3 test cases. Load the save files inside the GUI, and generate the range plots to compare with the provided ones.
+
+More helicopter tests can be conducted, gathering the input parameters and the outputs from the internet.
+

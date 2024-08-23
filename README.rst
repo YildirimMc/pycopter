@@ -16,18 +16,24 @@ PyCopter
 
 
 
-A model-based rotary-wing platform design package.
+PyCopter - A model-based rotary-wing platform design package.
 
-
-* Free software: Apache Software License 2.0
-* Documentation: https://pycopter.readthedocs.io.
-
-
-Features
+Getting Started
 --------
 
-* TODO
-The GUI and the main module will be separated in the future and GUI will only be available in releases.
+This program is used to approximate final performance characteristics of a rotor design. 
+A computational tool designed for quick rotor design exploration 
+and performance examining using fundamental aerodynamic theories such as Blade Element Theory and Momentum 
+Theory applied for rotorcrafts is implemented. The program calculates essential aerodynamic 
+metrics such as rotor lift, drag, power consumption and can estimate flight ranges. The outputs of the program are easy 
+enough to be interpretable by anyone, as well as sophisticated enough for the experienced users.
+
+Program uses *XFOIL* (link here) to generate polar data for the given profile instead of keeping a polar database. Users also can use their own polar data.
+
+The tool also includes a graphical user interface module.
+
+* Free software: Apache Software License 2.0
+* Documentation: https://pycopter.readthedocs.io. (To be implemented.)
 
 Credits
 -------
