@@ -36,7 +36,7 @@ class TestRotor(unittest.TestCase):
                 self.package_data = json.load(f)
         except:
             self.fail(f"Required file not found at: \n{package_path}")
-        # TODO: Learn how to test and whether we need package.json.
+        
 
 
     def test_calculate_thrust(self):
