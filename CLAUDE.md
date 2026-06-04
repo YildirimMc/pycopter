@@ -30,9 +30,9 @@
 - Install dependencies with:
   `.\.venv\Scripts\python.exe -m pip install -r requirements.txt`
 - Run the Panel dashboard from the repo root with `PYTHONPATH=src` set:
-  `python src/main.py`
+  `$env:PYTHONPATH='src'; .\.venv\Scripts\python.exe src/main.py`
 - Or serve it explicitly with:
-  `panel serve src/gui/dashboard.py --show`
+  `$env:PYTHONPATH='src'; .\.venv\Scripts\panel.exe serve src/gui/dashboard.py --show`
 
 ## Project Structure
 - `src/main.py` launches the Panel browser dashboard.

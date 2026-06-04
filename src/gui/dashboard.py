@@ -15,7 +15,7 @@ import panel as pn
 
 from pycopter import Rotor
 
-from .state import (
+from gui.state import (
     DashboardSettings,
     FlightSettings,
     RotorSettings,
@@ -43,6 +43,14 @@ PLOT_OPTIONS = [
 ENGINEERING_CSS = """
 body {
     background: #f4f4f2;
+}
+.app-title {
+    background: #30383d;
+    color: #f5f5f1;
+    font-size: 20px;
+    font-weight: 700;
+    letter-spacing: 0;
+    padding: 10px 14px;
 }
 .engineering-pane {
     border: 1px solid #9b9b94;
@@ -112,12 +120,10 @@ class PyCopterDashboard:
             min_height=430,
         )
         self.status = pn.pane.Markdown("`ready`", sizing_mode="stretch_width")
+        self._run_case(update_plot=True)
 
-    def view(self) -> pn.template.FastListTemplate:
-        controls = pn.Column(
-            self._section("Preset"),
-            self.preset_select,
-            pn.Row(self.load_preset_button, self.download_config),
+    def view(self) -> pn.Column:
+        parameter_controls = pn.Column(
             self._section("Rotor"),
             self.airfoil,
             self.new_polar,
@@ -137,29 +143,33 @@ class PyCopterDashboard:
             self.fuel_capacity,
             self.sfc,
             self.battery_capacity,
-            self._section("Actions"),
-            pn.Row(self.run_button, self.plot_button),
-            self.plot_select,
+            height=430,
+            styles={"overflow-y": "auto"},
             sizing_mode="stretch_width",
         )
 
-        template = pn.template.FastListTemplate(
-            title="PyCopter",
-            sidebar=[controls],
-            main=[
-                pn.Row(
-                    pn.Column(self.status, self.metrics, sizing_mode="stretch_width"),
-                    self.plot_pane,
-                    sizing_mode="stretch_both",
-                ),
-                self.console,
-            ],
-            accent_base_color="#44515a",
-            header_background="#30383d",
-            sidebar_width=335,
-            main_max_width="1600px",
+        controls = pn.Column(
+            self._section("Preset"),
+            self.preset_select,
+            pn.Row(self.load_preset_button, self.download_config),
+            self._section("Actions"),
+            pn.Row(self.run_button, self.plot_button),
+            self.plot_select,
+            parameter_controls,
+            width=330,
+            height=640,
+            css_classes=["engineering-pane"],
         )
-        return template
+
+        header = pn.pane.HTML('<div class="app-title">PyCopter</div>')
+        workbench = pn.Row(
+            controls,
+            pn.Column(self.status, self.metrics, width=410),
+            self.plot_pane,
+            height=660,
+            sizing_mode="stretch_width",
+        )
+        return pn.Column(header, workbench, self.console, sizing_mode="stretch_both")
 
     def _build_widgets(self) -> None:
         self.preset_paths = self._preset_paths()
@@ -328,7 +338,10 @@ class PyCopterDashboard:
             plt.close(self.plot_pane.object)
             self.plot_pane.object = figure
             if transcript.getvalue():
-                self.console.value = self.console.value.rstrip() + "\n\n[plot]\n" + transcript.getvalue()
+                self.console.value = (
+                    self.console.value.rstrip()
+                    + f"\n\n[plot]\nGenerated {self.plot_select.value}."
+                )
             self.status.object = f"`plot: {self.plot_select.value}`"
         except Exception as exc:  # noqa: BLE001 - show plotting/model errors in the workbench.
             self.status.object = f"`plot failed: {exc}`"
@@ -536,7 +549,7 @@ class PyCopterDashboard:
         return fig
 
 
-def create_dashboard() -> pn.template.FastListTemplate:
+def create_dashboard() -> pn.Column:
     return PyCopterDashboard().view()
 
 
@@ -544,4 +557,5 @@ def main() -> None:
     pn.serve(create_dashboard(), title="PyCopter", show=True, port=5006)
 
 
-create_dashboard().servable()
+if pn.state.served:
+    create_dashboard().servable()
