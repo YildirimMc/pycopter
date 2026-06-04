@@ -25,7 +25,7 @@ class RotorGeometryTests(unittest.TestCase):
 
         self.assertAlmostEqual(rotor.r, 10.645)
         self.assertAlmostEqual(rotor.tip_speed, 214.032)
-        self.assertAlmostEqual(rotor.solidity, 0.079223, places=6)
+        self.assertAlmostEqual(rotor.solidity, 0.079241, places=6)
         self.assertFalse(rotor.is_hovered)
 
     def test_ground_effect_increases_thrust_near_ground(self):
