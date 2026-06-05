@@ -17,7 +17,7 @@ from .models import (
     OperatingPoint,
     RotorSpec,
 )
-from .polars import AirfoilCoefficients, PolarProvider, XfoilPolarProvider
+from .polars import PolarProvider, XfoilPolarProvider
 
 
 class HoverSolver:
@@ -284,6 +284,7 @@ class HoverSolver:
             cl=coeffs.cl,
             cd=coeffs.cd,
             cm=coeffs.cm,
+            alpha_clamped=coeffs.alpha_clamped,
             loss_factor=loss_factor,
             induced_velocity_m_s=induced_velocity_m_s,
             external_axial_velocity_m_s=external_velocity_m_s,
@@ -332,9 +333,7 @@ class HoverSolver:
         element_loads: list[ElementLoad],
     ) -> HoverResult:
         per_blade_thrust_N = sum(load.dT_N for load in element_loads)
-        per_blade_torque_Nm = sum(load.dQ_Nm for load in element_loads)
         total_thrust_N = rotor.num_blades * per_blade_thrust_N
-        total_torque_Nm = rotor.num_blades * per_blade_torque_Nm
 
         induced_power_per_blade = sum(
             rotor.omega_rad_s
@@ -355,6 +354,8 @@ class HoverSolver:
         )
         profile_power_W = rotor.num_blades * profile_power_per_blade
         power_W = induced_power_W + profile_power_W
+        total_torque_Nm = power_W / rotor.omega_rad_s if rotor.omega_rad_s else 0.0
+        per_blade_torque_Nm = total_torque_Nm / rotor.num_blades
 
         positive_thrust = max(total_thrust_N, 0.0)
         ideal_power_W = (

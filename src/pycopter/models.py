@@ -151,7 +151,8 @@ class RotorSpec:
 
     @property
     def solidity(self) -> float:
-        samples = np.linspace(max(self.root_cutout_ratio, 0.02), 1.0, 80)
+        blade_start = max(self.root_cutout_ratio, self.stations[0].r_over_R)
+        samples = np.linspace(blade_start, 1.0, 80)
         chords = np.array([self.chord_at(r_over_R) for r_over_R in samples])
         mean_chord = float(np.trapezoid(chords, samples) / (samples[-1] - samples[0]))
         return self.num_blades * mean_chord / (np.pi * self.radius_m)
@@ -266,6 +267,7 @@ class ElementLoad:
     cl: float
     cd: float
     cm: float
+    alpha_clamped: bool
     loss_factor: float
     induced_velocity_m_s: float
     external_axial_velocity_m_s: float

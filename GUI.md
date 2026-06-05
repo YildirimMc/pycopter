@@ -114,8 +114,8 @@ All single-rotor hover outputs are on `HoverResult`.
 | `collective_pitch_deg` | `HoverResult.collective_pitch_deg` | deg | Collective used or solved for the hover result. |
 | `total_thrust_N` | `HoverResult.total_thrust_N` | N | Integrated rotor thrust. |
 | `per_blade_thrust_N` | `HoverResult.per_blade_thrust_N` | N/blade | Total thrust carried by one blade. |
-| `total_torque_Nm` | `HoverResult.total_torque_Nm` | N*m | Integrated rotor torque. |
-| `per_blade_torque_Nm` | `HoverResult.per_blade_torque_Nm` | N*m/blade | Torque contribution per blade. |
+| `total_torque_Nm` | `HoverResult.total_torque_Nm` | N*m | Shaft torque consistent with corrected shaft power. |
+| `per_blade_torque_Nm` | `HoverResult.per_blade_torque_Nm` | N*m/blade | Shaft torque contribution per blade. |
 | `power_W` | `HoverResult.power_W` | W | Shaft power from induced plus profile components. |
 | `induced_power_W` | `HoverResult.induced_power_W` | W | Induced component after `induced_power_factor`. |
 | `profile_power_W` | `HoverResult.profile_power_W` | W | Profile drag power from section Cd integration. |
@@ -142,6 +142,7 @@ radial element and is per blade.
 | `phi_deg`, `alpha_deg` | deg | Inflow angle and local effective angle of attack. |
 | `reynolds`, `mach` | ratio | Local section Reynolds and Mach values. |
 | `cl`, `cd`, `cm` | ratio | Local section coefficients from polar provider. |
+| `alpha_clamped` | bool | True when requested AoA was outside the generated polar table and coefficients were clamped. |
 | `loss_factor` | ratio | Combined root/tip loss factor. |
 | `induced_velocity_m_s` | m/s | Self-induced element velocity. |
 | `external_axial_velocity_m_s` | m/s | Axial inflow from upper rotor for coaxial lower rotor. |
