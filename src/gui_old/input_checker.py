@@ -1,4 +1,5 @@
 from .pycopterui import Ui_pycopter
+from pycopter.xfoil import ensure_airfoil_coordinates, is_naca_airfoil, normalize_airfoil_name
 
 class InputChecker():
     """
@@ -24,20 +25,23 @@ class InputChecker():
         self.error_message = "" # If functions return false, print this on the interface.
 
     def airfoil_checker(self):
-        """Checks airfoil input for proper NACA naming and returns False if an issue was detected. Returns True otherwise."""
-        airfoil = self.ui.airfoilText.toPlainText().lower()
+        """Checks airfoil input and returns False if an issue was detected."""
+        airfoil = normalize_airfoil_name(self.ui.airfoilText.toPlainText())
 
-        if airfoil[:4] != "naca": 
-            self.error_message("ERROR - Airfoil must be a NACA profile.") 
+        if not airfoil:
+            self.error_message = "ERROR - Airfoil must not be empty."
             return False
-        elif 4 <= len(airfoil[4:]) <= 6:
-            try:
-                _ = int(airfoil[4:])
-            except ValueError:
-                self.error_message("ERROR - Invalid airfoil. Only 4, 5, and 6 digits NACA profiles are supported.")
-                return False
-        else:
-            self.error_message("ERROR - Invalid airfoil. Only 4, 5, and 6 digits NACA profiles are supported.")
+
+        if is_naca_airfoil(airfoil):
+            return True
+
+        if airfoil.startswith("naca"):
+            self.error_message = "ERROR - Invalid NACA airfoil. Only 4, 5, and 6 digit NACA profiles are supported."
+            return False
+
+        success, _, message = ensure_airfoil_coordinates(airfoil)
+        if not success:
+            self.error_message = f"ERROR - {message}"
             return False
         
         return True

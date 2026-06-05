@@ -68,7 +68,7 @@ class Polar():
         Parameters
         ----------
         airfoil : str
-            Airfoil name. Only naca profiles are available. E.g. 'naca0012'.
+            Airfoil name. NACA profiles and UIUC coordinate-backed airfoils are supported.
         mach : float
             Mach speed of the airfoil.
         reynolds : float
@@ -81,14 +81,16 @@ class Polar():
         xfoil = Xfoil(new_polar)
         if new_polar:
             print("Generating XFOIL polar...")
-            xfoil.simulate(airfoil, mach, reynolds)
+            if not xfoil.simulate(airfoil, mach, reynolds):
+                raise RuntimeError(xfoil.error_message)
             self.polar = xfoil.read_polar()
         else:
             try:
                 self.polar = xfoil.read_polar()
-            except FileNotFoundError:
+            except (FileNotFoundError, ValueError):
                 print("Polar data not found. Generating new XFOIL polar...")
-                xfoil.simulate(airfoil, mach, reynolds)
+                if not xfoil.simulate(airfoil, mach, reynolds):
+                    raise RuntimeError(xfoil.error_message)
                 self.polar = xfoil.read_polar()
 
     def get_polar(self, alfa):

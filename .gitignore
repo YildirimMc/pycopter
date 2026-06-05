@@ -110,5 +110,6 @@ ENV/
 .vs/
 
 data/XFOIL6.99/polar.txt
+data/airfoils/
 references/
 data/cra_images/
