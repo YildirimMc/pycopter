@@ -134,7 +134,14 @@ class Xfoil():
         self.timeout = timeout
         self.error_message = ""
         
-    def simulate(self, airfoil:str, mach:float, reynolds:float):
+    def simulate(
+        self,
+        airfoil: str,
+        mach: float,
+        reynolds: float,
+        alpha_min_deg: float = -8,
+        alpha_max_deg: float | None = None,
+    ):
         """
         Runs the xfoil process with the given parameters. Xfoil process saves the polar data in a temporary location.
 
@@ -165,7 +172,11 @@ class Xfoil():
             self.output_path_for_xfoil,
             "",
         ]
-        inputs = [f"alfa {alfa}" for alfa in range(-8, self.max_theta + 6)]
+        if alpha_max_deg is None:
+            alpha_max_deg = self.max_theta + 5
+        alpha_min = int(round(alpha_min_deg))
+        alpha_max = int(round(alpha_max_deg))
+        inputs = [f"alfa {alfa}" for alfa in range(alpha_min, alpha_max + 1)]
         command = "\n".join(inputs_init + inputs + ["pacc", "", "quit"]) + "\n"
 
         try:
