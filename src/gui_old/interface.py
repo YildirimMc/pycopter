@@ -89,8 +89,12 @@ class Interface():
             return
 
         self.print("Initializing rotor...")
-        self.rotor = Rotor(airfoil, num_blades, chord, diameter, tip_speed_mach, 
-                           washout, rotor_root_cutout, b_new_polars)
+        try:
+            self.rotor = Rotor(airfoil, num_blades, chord, diameter, tip_speed_mach,
+                               washout, rotor_root_cutout, b_new_polars)
+        except (RuntimeError, ValueError) as err:
+            self.print(str(err))
+            return
         self.print(f"Tip Speed: {self.rotor.tip_speed:.3f} [m/s] | Rotor Disk Area: {self.rotor.rotor_disk_area:.3f} [m2] | Solidity: {self.rotor.solidity:.3f}")
     
         self.ui.calcHoverBtn.setEnabled(True)
@@ -464,4 +468,3 @@ class Interface():
         ax1.grid()
         fig.legend(loc="upper left")
         return fig
-        
