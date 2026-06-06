@@ -73,6 +73,37 @@ class TestBemtHover(unittest.TestCase):
             delta=1e-6,
         )
 
+    def test_target_trim_expands_below_configured_min_collective(self):
+        oversized_rotor = RotorSpec(
+            airfoil="naca0012",
+            num_blades=5,
+            rotor_diameter_m=35.0,
+            headspeed_rpm=120.0,
+            root_cutout_ratio=0.08,
+            stations=[
+                BladeStation(0.08, 1.0, 10.0, "naca0012"),
+                BladeStation(0.40, 1.0, 7.0, "naca0012"),
+                BladeStation(0.75, 1.0, 3.5, "naca0012"),
+                BladeStation(1.00, 1.0, 1.0, "naca0012"),
+            ],
+        )
+        settings = HoverSolverSettings(
+            blade_element_count=32,
+            min_collective_deg=0.0,
+            max_collective_deg=25.0,
+            thrust_tolerance=0.02,
+            collective_tolerance_deg=0.02,
+        )
+        solver = HoverSolver(self.polar_provider, settings)
+
+        result = solver.solve(
+            oversized_rotor,
+            OperatingPoint(target_thrust_N=9.81, trim_mode="target_thrust"),
+        )
+
+        self.assertLess(result.collective_pitch_deg, 0.0)
+        self.assertAlmostEqual(9.81, result.total_thrust_N, delta=0.25)
+
     def test_fixed_collective_reports_local_low_reynolds_values(self):
         solver = HoverSolver(self.polar_provider, self.settings)
         result = solver.solve(
@@ -198,7 +229,7 @@ class TestXfoilProviderBounds(unittest.TestCase):
         self.assertLessEqual(len(cache_path.name), 32)
         provider.cleanup()
 
-    def test_xfoil_provider_caps_requested_alpha_to_15_degrees(self):
+    def test_xfoil_provider_caps_requested_alpha_to_18_degrees(self):
         calls = {}
 
         class FakeXfoil:
@@ -216,15 +247,15 @@ class TestXfoilProviderBounds(unittest.TestCase):
                 return [
                     [-10.0, -0.8, 0.04, 0.0, 0.0],
                     [0.0, 0.0, 0.01, 0.0, 0.0],
-                    [15.0, 1.0, 0.05, 0.0, 0.0],
+                    [18.0, 1.0, 0.05, 0.0, 0.0],
                 ]
 
         with patch("pycopter.polars.Xfoil", FakeXfoil):
             provider = XfoilPolarProvider(alpha_max_deg=25.0)
-            coeffs = provider.get_coefficients("naca0012", 18.0, 100000.0, 0.1)
+            coeffs = provider.get_coefficients("naca0012", 20.0, 100000.0, 0.1)
 
-        self.assertLessEqual(calls["alpha_max_deg"], 15.0)
-        self.assertEqual(15.0, coeffs.alpha_deg)
+        self.assertLessEqual(calls["alpha_max_deg"], 18.0)
+        self.assertEqual(18.0, coeffs.alpha_deg)
         self.assertTrue(coeffs.alpha_clamped)
 
     def test_xfoil_provider_never_rounds_reynolds_to_zero(self):

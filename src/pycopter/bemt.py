@@ -67,17 +67,32 @@ class HoverSolver:
             self.settings.max_collective_deg,
             external_axial_velocity,
         )
-        if target_thrust_N < low.total_thrust_N:
-            raise ValueError(
-                "Target thrust is below the minimum collective trim bracket."
-            )
-        if target_thrust_N > high.total_thrust_N:
-            raise ValueError(
-                "Target thrust is above the maximum collective trim bracket."
-            )
-
         collective_low = self.settings.min_collective_deg
         collective_high = self.settings.max_collective_deg
+
+        if target_thrust_N < low.total_thrust_N:
+            collective_low, low, collective_high, high = self._expand_low_collective_bracket(
+                rotor,
+                operating_point,
+                external_axial_velocity,
+                target_thrust_N,
+                collective_low,
+                low,
+                collective_high,
+                high,
+            )
+        if target_thrust_N > high.total_thrust_N:
+            collective_low, low, collective_high, high = self._expand_high_collective_bracket(
+                rotor,
+                operating_point,
+                external_axial_velocity,
+                target_thrust_N,
+                collective_low,
+                low,
+                collective_high,
+                high,
+            )
+
         best = high
         for _ in range(self.settings.max_trim_iterations):
             collective_mid = 0.5 * (collective_low + collective_high)
@@ -90,13 +105,78 @@ class HoverSolver:
             thrust_error = best.total_thrust_N - target_thrust_N
             if abs(thrust_error) <= self.settings.thrust_tolerance * target_thrust_N:
                 return best
-            if collective_high - collective_low <= self.settings.collective_tolerance_deg:
-                return best
             if thrust_error > 0.0:
                 collective_high = collective_mid
+                high = best
             else:
                 collective_low = collective_mid
-        return best
+                low = best
+        return min(
+            (low, high, best),
+            key=lambda result: abs(result.total_thrust_N - target_thrust_N),
+        )
+
+    def _expand_low_collective_bracket(
+        self,
+        rotor: RotorSpec,
+        operating_point: OperatingPoint,
+        external_axial_velocity: ExternalVelocityProfile | None,
+        target_thrust_N: float,
+        collective_low: float,
+        low: HoverResult,
+        collective_high: float,
+        high: HoverResult,
+    ) -> tuple[float, HoverResult, float, HoverResult]:
+        floor_deg = -45.0
+        step_deg = max(5.0, collective_high - collective_low)
+        while target_thrust_N < low.total_thrust_N and collective_low > floor_deg:
+            collective_high = collective_low
+            high = low
+            collective_low = max(floor_deg, collective_low - step_deg)
+            low = self.solve_fixed_collective(
+                rotor,
+                operating_point,
+                collective_low,
+                external_axial_velocity,
+            )
+            step_deg *= 1.5
+
+        if target_thrust_N < low.total_thrust_N:
+            raise ValueError(
+                "Target thrust is below the achievable collective trim range."
+            )
+        return collective_low, low, collective_high, high
+
+    def _expand_high_collective_bracket(
+        self,
+        rotor: RotorSpec,
+        operating_point: OperatingPoint,
+        external_axial_velocity: ExternalVelocityProfile | None,
+        target_thrust_N: float,
+        collective_low: float,
+        low: HoverResult,
+        collective_high: float,
+        high: HoverResult,
+    ) -> tuple[float, HoverResult, float, HoverResult]:
+        ceiling_deg = 45.0
+        step_deg = max(5.0, collective_high - collective_low)
+        while target_thrust_N > high.total_thrust_N and collective_high < ceiling_deg:
+            collective_low = collective_high
+            low = high
+            collective_high = min(ceiling_deg, collective_high + step_deg)
+            high = self.solve_fixed_collective(
+                rotor,
+                operating_point,
+                collective_high,
+                external_axial_velocity,
+            )
+            step_deg *= 1.5
+
+        if target_thrust_N > high.total_thrust_N:
+            raise ValueError(
+                "Target thrust is above the achievable collective trim range."
+            )
+        return collective_low, low, collective_high, high
 
     def solve_fixed_collective(
         self,

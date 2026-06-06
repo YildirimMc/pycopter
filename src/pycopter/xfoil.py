@@ -8,7 +8,7 @@ from urllib.request import Request, urlopen
 
 UIUC_COORD_BASE_URL = "https://m-selig.ae.illinois.edu/ads/coord"
 AIRFOIL_NAME_RE = re.compile(r"^[a-z0-9_.-]+$")
-MAX_XFOIL_ALPHA_DEG = 15
+MAX_XFOIL_ALPHA_DEG = 18
 
 
 def get_repo_root():
@@ -140,7 +140,7 @@ class Xfoil():
         airfoil: str,
         mach: float,
         reynolds: float,
-        alpha_min_deg: float = -8,
+        alpha_min_deg: float = -3,
         alpha_max_deg: float | None = None,
     ):
         """

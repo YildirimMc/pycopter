@@ -496,7 +496,7 @@ class XfoilPolarProvider:
     def __init__(
         self,
         new_polar: bool = True,
-        alpha_min_deg: float = -10.0,
+        alpha_min_deg: float = -3.0,
         alpha_max_deg: float = MAX_XFOIL_ALPHA_DEG,
         reynolds_bin: float = 100000.0,
         mach_bin: float = 0.1,

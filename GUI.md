@@ -60,8 +60,7 @@ typed endpoints above.
 | `num_blades` | `RotorSpec.num_blades` | count | `1-12`, default `2` for drones | Number of blades on one rotor, not total aircraft blades. |
 | `chord` | `RotorSpec.from_uniform_blade(chord_m=...)` | m | `0.001-2.5`, default project/preset value | Uniform chord fallback when no station table is used. |
 | `rotor_diam` | `RotorSpec.rotor_diameter_m` | m | `0.05-30`, default project/preset value | Rotor disk diameter. |
-| `tip_speed_mach` | `RotorSpec.tip_speed_mach` | Mach | `0.02-0.9`, default preset value | Legacy speed input; prefer `headspeed_rpm` for drones. |
-| `washout` | `from_uniform_blade(washout_deg=...)` | deg | `-30 to 30`, default preset value | Linear tip twist fallback when no station table is used. |
+| `tip_speed_mach` | `RotorSpec.tip_speed_mach` | Mach | calculated from `headspeed_rpm` | Report-only value in the Web UI. Legacy configs may load it to derive RPM, but drone workflows enter headspeed directly. |
 | `root_cutout` | `RotorSpec.root_cutout_ratio` | r/R | `0-0.95`, default `0.02` | Inner radius excluded from blade/disk loading. |
 | `gross` | `OperatingPoint.gross_mass_kg` | kg | `0.01-100000`, default preset value | Aircraft mass used to derive target hover thrust. |
 | `density` | `OperatingPoint.density_kg_m3` | kg/m3 | `0.01-2.0`, default `1.225` | Air density. |
@@ -75,21 +74,39 @@ typed endpoints above.
 |---|---|---:|---|---|
 | `rotor_system_type` | GUI branch to `HoverSolver.solve` or `solve_coaxial_hover` | enum | `single`, `coaxial`; default `single` | Selects single rotor or stacked coaxial calculation. |
 | `headspeed_rpm` | `RotorSpec.headspeed_rpm` | rpm | `100-100000`; default derived from tip Mach | Direct rotor speed input. Preferred for sub-10 kg electric drones. |
-| `headspeed_input_mode` | GUI branch | enum | `rpm`, `tip_mach`; default `rpm` | Choose whether `headspeed_rpm` or `tip_speed_mach` controls omega. |
+| `root_twist_deg` | `BladeStation.twist_deg` via uniform quick-entry | deg | `-30 to 30`; default `10` | Built-in pitch/twist at the first blade station for uniform quick-entry. |
+| `tip_twist_deg` | `BladeStation.twist_deg` via uniform quick-entry | deg | `-30 to 30`; default `1` | Built-in pitch/twist at the blade tip for uniform quick-entry. |
+| `headspeed_input_mode` | GUI branch | enum | `rpm`; default `rpm` | Compatibility key retained for saved configs; the Web UI uses RPM input only. |
 | `kinematic_viscosity_m2_s` | `OperatingPoint.kinematic_viscosity_m2_s` | m2/s | `1.0e-5-2.5e-5`; default `1.5e-5` | Used for local Reynolds number at each blade station. |
 | `blade_element_count` | `HoverSolverSettings.blade_element_count` | count | `20-200`; default `60` | Radial resolution of the BEMT integration. |
 | `trim_mode` | `OperatingPoint.trim_mode` | enum | `target_thrust`, `fixed_collective`; default `target_thrust` | Solve collective for target thrust or evaluate a fixed pitch. |
 | `collective_pitch_deg` | `OperatingPoint.collective_pitch_deg` | deg | `-5 to 25`; default `8` | Used in fixed-collective mode and equal-collective coaxial studies. |
-| `max_collective_deg` | `HoverSolverSettings.max_collective_deg` | deg | `0-35`; default `20` | Upper collective search bound for target-thrust trim. |
-| `min_collective_deg` | `HoverSolverSettings.min_collective_deg` | deg | `-10 to 10`; default `-5` | Lower collective search bound for target-thrust trim. |
-| `polar_alpha_min_deg` | `XfoilPolarProvider.alpha_min_deg` | deg | `-20 to 5`; default `-10` | Lower AoA bound for generated XFOIL polar tables. |
-| `polar_alpha_max_deg` | `XfoilPolarProvider.alpha_max_deg` | deg | `10-15`; default `15` | Upper AoA bound for generated XFOIL polar tables. Requests above 15 deg are capped because XFOIL often fails there and this is an estimator. |
+| `max_collective_deg` | `HoverSolverSettings.max_collective_deg` | deg | `0-35`; default `15` | Upper collective search bound for target-thrust trim. |
+| `min_collective_deg` | `HoverSolverSettings.min_collective_deg` | deg | `-10 to 10`; default `0` | Lower collective search bound for target-thrust trim. |
+| `polar_alpha_min_deg` | `XfoilPolarProvider.alpha_min_deg` | deg | `-20 to 5`; default `-3` | Lower AoA bound for generated XFOIL polar tables. |
+| `polar_alpha_max_deg` | `XfoilPolarProvider.alpha_max_deg` | deg | `10-18`; default `18` | Upper AoA bound for generated XFOIL polar tables. Requests above 18 deg are capped because XFOIL often fails there and this is an estimator. |
 | `xfoil_parallel_workers` | `XfoilPolarProvider.parallel_workers` | count | `2-16`; default `8` | Maximum MPI workers used to generate independent missing XFOIL polar bins. Use `8` for the current hover workflow unless explicitly debugging. |
 | `xfoil_parallel_backend` | `XfoilPolarProvider.parallel_backend` | enum | `mpi`, `serial`; default `mpi` | `mpi` requires a working MPI runtime and runs missing XFOIL polar bins through `mpi4py.futures`. `serial` is only for explicit non-parallel debugging. |
 | `xfoil_cache_directory` | `XfoilPolarProvider.cache_directory` | path | optional; default provider-owned temp dir | Advanced override for generated polar files. Default is a short temporary folder under ignored `data/XFOIL6.99/tmp/`; do not point this at a tracked repo path. |
 | `tip_loss_model` | `HoverSolverSettings.tip_loss_model` | enum | `prandtl`, `none`; default `prandtl` | Enables Prandtl finite-blade tip loss. |
 | `root_loss_model` | `HoverSolverSettings.root_loss_model` | enum | `prandtl`, `none`; default `prandtl` | Enables Prandtl-style root loss near blade cutout. |
 | `induced_power_factor` | `HoverSolverSettings.induced_power_factor` | factor | `1.0-1.3`; default `1.05` | Nonideal induced-power correction; set `1.0` for pure BEMT. |
+
+## Propulsion Estimation Inputs
+
+These fields are post-processing inputs. They must not change rotor hover
+physics, and the UI must display only the selected propulsion model's derived
+outputs.
+
+| GUI key | Endpoint | Units | Range / default | Description |
+|---|---|---:|---|---|
+| `propulsion_model` | GUI branch | enum | `electric`, `fossil`; default `electric` | Selects electric battery/motor estimates or fossil-fuel engine estimates. |
+| `battery_capacity_Wh` | GUI post-process only | Wh | `>0`, default `100` | Total battery energy for small electric aircraft estimates. |
+| `battery_usable_fraction` | GUI post-process only | fraction | `0.05-1.0`, default `0.8` | Fraction of nominal battery energy assumed usable. |
+| `motor_efficiency` | GUI post-process only | fraction | `0.01-1.0`, default `0.85` | Motor efficiency used to convert shaft power to electrical input power. |
+| `esc_efficiency` | GUI post-process only | fraction | `0.01-1.0`, default `0.95` | ESC efficiency used with motor efficiency for electric input power. |
+| `fuel_capacity_kg` | GUI post-process only | kg | `>=0`, default `1.5` | Fuel mass for fossil-fuel endurance estimates. |
+| `specific_fuel_consumption_kg_per_kWh` | GUI post-process only | kg/kWh | `>0`, default `0.3` | Fuel consumption per engine input energy. |
 
 ## Blade Station Table Inputs
 
@@ -183,15 +200,22 @@ All coaxial outputs are on `CoaxialHoverResult`.
 - Add an explicit radial blade station table. The old chord/washout fields can
   remain as a "uniform blade" quick-entry mode.
 - Prefer `headspeed_rpm` for drone workflows. Keep `tip_speed_mach` only as a
-  legacy/large-helicopter input mode.
+  calculated/report-only value.
+- Replace the old `washout` quick-entry field with explicit root and tip twist
+  fields. Legacy saved configs may map `washout` to a tip twist for loading.
 - Separate fuel/electric range UI from rotor hover physics. The new solver
   reports shaft power only; motor, ESC, battery, and fuel models should consume
   `power_W` downstream.
+- Keep fossil-fuel and electric estimates visually separated in the GUI. Output
+  summaries and propulsion-specific plots must show only the active propulsion
+  model.
 - Display blade load tables and root moments as first-class outputs. These are
   the new product focus and should not be hidden in debug text.
 - Wire XFOIL settings through `XfoilPolarProvider(...)`. Generated polars are
   calculation scratch data: keep the default temporary cache or an ignored
   custom path, and never track them in Git.
+- The root-level `webui.py` launcher starts the local Panel Web UI. Closing the
+  owning terminal window or pressing Ctrl+C stops the server.
 
 ## XFOIL Cache And Parallelism
 
