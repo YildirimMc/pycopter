@@ -12,6 +12,7 @@ from .models import (
     CoaxialSpec,
     ElementLoad,
     ExternalVelocityProfile,
+    GRAVITY_M_S2,
     HoverResult,
     HoverSolverSettings,
     OperatingPoint,
@@ -107,6 +108,7 @@ class HoverSolver:
         """Solve all radial elements at a prescribed collective pitch."""
         r_start = max(rotor.root_radius_m, rotor.stations[0].r_over_R * rotor.radius_m)
         edges = np.linspace(r_start, rotor.radius_m, self.settings.blade_element_count + 1)
+        self._prepare_polar_cache(rotor, operating_point, edges, external_axial_velocity)
         element_loads = []
 
         for left, right in zip(edges[:-1], edges[1:]):
@@ -127,6 +129,59 @@ class HoverSolver:
             )
 
         return self._integrate_result(rotor, operating_point, collective_pitch_deg, element_loads)
+
+    def _prepare_polar_cache(
+        self,
+        rotor: RotorSpec,
+        operating_point: OperatingPoint,
+        edges: np.ndarray,
+        external_axial_velocity: ExternalVelocityProfile | None,
+    ) -> None:
+        prepare_conditions = getattr(self.polar_provider, "prepare_conditions", None)
+        if prepare_conditions is None:
+            return
+
+        induced_estimates = self._prefetch_induced_velocity_estimates(
+            rotor,
+            operating_point,
+        )
+        conditions = []
+        for left, right in zip(edges[:-1], edges[1:]):
+            r_m = 0.5 * (left + right)
+            r_over_R = r_m / rotor.radius_m
+            chord_m = rotor.chord_at(r_over_R)
+            tangential_velocity = rotor.omega_rad_s * r_m
+            external_velocity = (
+                float(external_axial_velocity(r_m)) if external_axial_velocity else 0.0
+            )
+            for induced_velocity in induced_estimates:
+                axial_velocity = external_velocity + induced_velocity
+                v_rel = sqrt(tangential_velocity**2 + axial_velocity**2)
+                reynolds = v_rel * chord_m / operating_point.kinematic_viscosity_m2_s
+                mach = v_rel / operating_point.speed_of_sound_m_s
+                conditions.append((rotor.airfoil_at(r_over_R), reynolds, mach))
+
+        prepare_conditions(conditions)
+
+    def _prefetch_induced_velocity_estimates(
+        self,
+        rotor: RotorSpec,
+        operating_point: OperatingPoint,
+    ) -> tuple[float, ...]:
+        target_thrust_N = None
+        if operating_point.target_thrust_N is not None:
+            target_thrust_N = operating_point.target_thrust_N
+        elif operating_point.gross_mass_kg is not None:
+            target_thrust_N = operating_point.gross_mass_kg * GRAVITY_M_S2
+
+        if target_thrust_N is None:
+            return (0.0,)
+
+        ideal_induced = sqrt(
+            target_thrust_N
+            / (2.0 * operating_point.density_kg_m3 * rotor.disk_area_m2)
+        )
+        return (0.0, ideal_induced, 2.0 * ideal_induced)
 
     def _solve_element(
         self,

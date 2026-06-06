@@ -182,9 +182,13 @@ class TestXfoilProviderBounds(unittest.TestCase):
         provider = XfoilPolarProvider()
         cache_path = provider._cache_file_path("naca0012", 100000.0, 0.1)
         repo_root = Path(__file__).resolve().parents[1]
+        temp_root = repo_root / "data" / "XFOIL6.99" / "tmp"
 
-        self.assertFalse(cache_path.resolve().is_relative_to(repo_root.resolve()))
+        self.assertTrue(cache_path.resolve().is_relative_to(temp_root.resolve()))
+        self.assertTrue(provider.cache_directory.name.startswith("px"))
+        self.assertLessEqual(len(provider.cache_directory.name), 8)
         provider.cleanup()
+        self.assertFalse(provider.cache_directory.exists())
 
     def test_xfoil_provider_caps_requested_alpha_to_15_degrees(self):
         calls = {}
@@ -381,6 +385,7 @@ class TestXfoilProviderBounds(unittest.TestCase):
                         ("naca0012", 150000.0, 0.1),
                     ]
                 )
+            provider.cleanup()
 
 
 class TestRealXfoilHover(unittest.TestCase):

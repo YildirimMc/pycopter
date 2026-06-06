@@ -111,6 +111,7 @@ ENV/
 
 data/XFOIL6.99/polar.txt
 data/XFOIL6.99/polars/
+data/XFOIL6.99/tmp/
 data/airfoils/
 references/
 data/cra_images/

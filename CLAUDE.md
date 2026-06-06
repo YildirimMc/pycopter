@@ -22,6 +22,8 @@
 - Hover calculations integrate local blade-element lift/drag with annular momentum balance at each radial station. Local angle of attack, Reynolds number, Mach number, Prandtl root/tip loss, thrust, torque, power, and pitch moment are preserved in `HoverResult.element_loads`.
 - Coaxial hover is modeled as upper and lower rotor solves with a first-order upper-wake velocity/contraction estimate applied to the lower rotor. Treat it as a better initial estimator than total-blade-count shortcuts, not as a full free-wake model.
 - For scientific traceability, do not reintroduce hardcoded mean-drag curves as the primary model. Use local polar lookup or an explicit documented calibration path.
+- XFOIL polar generation is treated as scratch data. `XfoilPolarProvider` defaults to a provider-owned temporary cache under ignored `data/XFOIL6.99/tmp/`; generated polar files must not be committed.
+- `HoverSolver` prefetches radial airfoil/Re/Mach bins through compatible polar providers before element iterations. `XfoilPolarProvider` can distribute independent missing XFOIL jobs with `mpi4py.futures.MPIPoolExecutor(max_workers=8)` when an MPI runtime is installed; keep BEMT math deterministic and use read-only/interpolated polar tables inside the element solve.
 
 ## Testing
 - Current tests are under `tests/` and use `unittest`, but they appear stale relative to the current `Rotor` API.
@@ -50,9 +52,9 @@
 - `src/pycopter/pycopter.py` contains the legacy-compatible `Rotor` facade and placeholder aircraft-level classes.
 - `src/pycopter/models.py` contains typed rotor geometry, operating-point, solver-setting, and result dataclasses.
 - `src/pycopter/bemt.py` contains the hover BEMT solver and first-order coaxial hover solver.
-- `src/pycopter/polars.py` contains analytic and XFOIL-backed airfoil polar providers.
+- `src/pycopter/polars.py` contains analytic and XFOIL-backed airfoil polar providers, including temporary polar caching and optional MPI prefetch.
 - `src/pycopter/utils.py` contains legacy polar interpolation, XFOIL-facing `Polar`, Reynolds/Wald helpers, and reference-area utilities.
-- `src/pycopter/xfoil.py` starts XFOIL and reads generated polar data from `data/XFOIL6.99/polar.txt`.
+- `src/pycopter/xfoil.py` starts XFOIL and reads generated polar data. Its low-level default is `data/XFOIL6.99/polar.txt`, but new solver code should route through `XfoilPolarProvider` so per-condition temp cache paths are used.
 - `data/` contains XFOIL binaries and reference data.
 - `tutorials/presets/` contains sample helicopter configurations and generated figures.
 
@@ -60,6 +62,6 @@
 - Most commit messages are short imperative or descriptive summaries.
 - GUI actions are centralized in `Interface`; add new buttons/actions there and keep generated UI code separate where possible.
 - `Rotor.hover()` establishes state needed by `Rotor.forward_flight()`. Call hover first when adding direct model usage.
-- XFOIL output is a mutable file in `data/XFOIL6.99/polar.txt`; tests and examples should account for that side effect.
+- XFOIL output is mutable scratch data. Legacy code may still touch `data/XFOIL6.99/polar.txt`; new solver code should use provider-managed ignored temp paths and tests should account for these side effects.
 - Many printed values are duplicated between model methods and GUI output. When changing formulas, check both the stored attributes and the displayed text.
 - This is a solo-maintained project; prefer useful local scripts and simple docs over public-package boilerplate.
