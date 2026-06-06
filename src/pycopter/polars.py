@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import shutil
 import uuid
 from dataclasses import dataclass
@@ -434,14 +435,18 @@ class XfoilPolarProvider:
             yield _run_xfoil_polar_job(job)
 
     def _cache_file_path(self, airfoil: str, reynolds: float, mach: float) -> Path:
-        reynolds_part = f"re{int(round(reynolds))}"
-        mach_part = f"m{self._safe_float_token(mach)}"
-        alpha_part = (
-            f"a{self._safe_float_token(self.alpha_min_deg)}_"
-            f"{self._safe_float_token(self.alpha_max_deg)}"
+        key = "|".join(
+            [
+                normalize_airfoil_name(airfoil),
+                str(int(round(reynolds))),
+                self._safe_float_token(mach),
+                self._safe_float_token(self.alpha_min_deg),
+                self._safe_float_token(self.alpha_max_deg),
+            ]
         )
-        filename = f"{normalize_airfoil_name(airfoil)}_{reynolds_part}_{mach_part}_{alpha_part}.txt"
-        return self.cache_directory / filename
+        # XFOIL silently truncates long filename components on Windows.
+        digest = hashlib.sha1(key.encode("ascii")).hexdigest()[:16]
+        return self.cache_directory / f"p{digest}.txt"
 
     def _safe_float_token(self, value: float) -> str:
         text = f"{value:.4g}".replace("-", "neg").replace(".", "p")
