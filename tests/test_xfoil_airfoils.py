@@ -61,6 +61,78 @@ class TestXfoilAirfoils(unittest.TestCase):
         self.assertIsNone(commands)
         self.assertIn("missingfoil", message)
 
+    def test_xfoil_default_alpha_sweep_stops_at_15_degrees(self):
+        captured = {}
+        polar_path = self.repo_root / "data" / "XFOIL6.99" / "polar.txt"
+        polar_path.parent.mkdir(parents=True)
+
+        class FakeProcess:
+            def communicate(self, input, timeout):
+                captured["command"] = input
+                polar_path.write_text(
+                    "\n" * 12
+                    + "-8 0.0 0.01 0 0\n"
+                    + "0 0.0 0.01 0 0\n"
+                    + "15 1.0 0.05 0 0\n",
+                    encoding="utf-8",
+                )
+                return "", ""
+
+        runner = self.xfoil.Xfoil(new_polar=False)
+        runner.repo_root = self.repo_root
+        runner.output_path = polar_path
+        runner.output_path_for_xfoil = "data/XFOIL6.99/polar.txt"
+
+        with patch.object(self.xfoil.subprocess, "Popen", return_value=FakeProcess()):
+            self.assertTrue(runner.simulate("naca0012", mach=0.1, reynolds=100000))
+
+        alpha_lines = [
+            line for line in captured["command"].splitlines() if line.startswith("alfa ")
+        ]
+        self.assertEqual("alfa 15", alpha_lines[-1])
+        self.assertNotIn("alfa 16", alpha_lines)
+        self.assertNotIn("alfa 20", alpha_lines)
+
+    def test_xfoil_explicit_alpha_sweep_is_capped_at_15_degrees(self):
+        captured = {}
+        polar_path = self.repo_root / "data" / "XFOIL6.99" / "polar.txt"
+        polar_path.parent.mkdir(parents=True)
+
+        class FakeProcess:
+            def communicate(self, input, timeout):
+                captured["command"] = input
+                polar_path.write_text(
+                    "\n" * 12
+                    + "-5 0.0 0.01 0 0\n"
+                    + "0 0.0 0.01 0 0\n"
+                    + "15 1.0 0.05 0 0\n",
+                    encoding="utf-8",
+                )
+                return "", ""
+
+        runner = self.xfoil.Xfoil(new_polar=False)
+        runner.repo_root = self.repo_root
+        runner.output_path = polar_path
+        runner.output_path_for_xfoil = "data/XFOIL6.99/polar.txt"
+
+        with patch.object(self.xfoil.subprocess, "Popen", return_value=FakeProcess()):
+            self.assertTrue(
+                runner.simulate(
+                    "naca0012",
+                    mach=0.1,
+                    reynolds=100000,
+                    alpha_min_deg=-5,
+                    alpha_max_deg=25,
+                )
+            )
+
+        alpha_lines = [
+            line for line in captured["command"].splitlines() if line.startswith("alfa ")
+        ]
+        self.assertEqual("alfa 15", alpha_lines[-1])
+        self.assertNotIn("alfa 16", alpha_lines)
+        self.assertNotIn("alfa 25", alpha_lines)
+
 
 if __name__ == "__main__":
     unittest.main()

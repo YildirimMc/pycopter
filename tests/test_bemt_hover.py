@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from pycopter import Rotor
 from pycopter.bemt import HoverSolver, solve_coaxial_hover
@@ -9,7 +10,7 @@ from pycopter.models import (
     OperatingPoint,
     RotorSpec,
 )
-from pycopter.polars import LinearPolarProvider
+from pycopter.polars import LinearPolarProvider, XfoilPolarProvider
 
 
 class TestBemtHover(unittest.TestCase):
@@ -144,6 +145,37 @@ class TestInputValidation(unittest.TestCase):
                     BladeStation(0.5, 0.03, 0.0),
                 ],
             )
+
+
+class TestXfoilProviderBounds(unittest.TestCase):
+    def test_xfoil_provider_caps_requested_alpha_to_15_degrees(self):
+        calls = {}
+
+        class FakeXfoil:
+            error_message = ""
+
+            def __init__(self, new_polar=True, timeout=60):
+                self.new_polar = new_polar
+                self.timeout = timeout
+
+            def simulate(self, airfoil, mach, reynolds, alpha_min_deg, alpha_max_deg):
+                calls["alpha_max_deg"] = alpha_max_deg
+                return True
+
+            def read_polar(self):
+                return [
+                    [-10.0, -0.8, 0.04, 0.0, 0.0],
+                    [0.0, 0.0, 0.01, 0.0, 0.0],
+                    [15.0, 1.0, 0.05, 0.0, 0.0],
+                ]
+
+        with patch("pycopter.polars.Xfoil", FakeXfoil):
+            provider = XfoilPolarProvider(alpha_max_deg=25.0)
+            coeffs = provider.get_coefficients("naca0012", 18.0, 100000.0, 0.1)
+
+        self.assertLessEqual(calls["alpha_max_deg"], 15.0)
+        self.assertEqual(15.0, coeffs.alpha_deg)
+        self.assertTrue(coeffs.alpha_clamped)
 
 
 if __name__ == "__main__":
