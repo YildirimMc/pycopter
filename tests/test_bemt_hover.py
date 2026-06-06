@@ -89,6 +89,34 @@ class TestBemtHover(unittest.TestCase):
         self.assertTrue(any(load.cm != 0.0 for load in result.element_loads))
         self.assertNotEqual(0.0, result.aerodynamic_pitching_moment_Nm_per_blade)
 
+    def test_hover_solver_prefetches_radial_polar_conditions(self):
+        class RecordingPolarProvider(LinearPolarProvider):
+            def __init__(self):
+                super().__init__()
+                self.prepared_conditions = []
+
+            def prepare_conditions(self, conditions):
+                self.prepared_conditions.extend(list(conditions))
+
+        provider = RecordingPolarProvider()
+        solver = HoverSolver(provider, self.settings)
+        solver.solve(
+            self.rotor,
+            OperatingPoint(
+                collective_pitch_deg=10.0,
+                trim_mode="fixed_collective",
+            ),
+        )
+
+        self.assertGreaterEqual(
+            len(provider.prepared_conditions),
+            self.settings.blade_element_count,
+        )
+        airfoil, reynolds, mach = provider.prepared_conditions[0]
+        self.assertEqual("naca0012", airfoil)
+        self.assertGreater(reynolds, 0.0)
+        self.assertGreaterEqual(mach, 0.0)
+
     def test_coaxial_hover_reports_lower_rotor_interference(self):
         result = solve_coaxial_hover(
             CoaxialSpec(
@@ -150,6 +178,14 @@ class TestInputValidation(unittest.TestCase):
 
 
 class TestXfoilProviderBounds(unittest.TestCase):
+    def test_xfoil_provider_default_cache_directory_is_temporary(self):
+        provider = XfoilPolarProvider()
+        cache_path = provider._cache_file_path("naca0012", 100000.0, 0.1)
+        repo_root = Path(__file__).resolve().parents[1]
+
+        self.assertFalse(cache_path.resolve().is_relative_to(repo_root.resolve()))
+        provider.cleanup()
+
     def test_xfoil_provider_caps_requested_alpha_to_15_degrees(self):
         calls = {}
 
@@ -280,6 +316,71 @@ class TestXfoilProviderBounds(unittest.TestCase):
                 coeffs = provider.get_coefficients("naca0012", 5.0, 100000.0, 0.1)
 
         self.assertGreater(coeffs.cl, 0.0)
+
+    def test_xfoil_provider_prefetch_uses_mpi_executor_with_eight_workers(self):
+        calls = {}
+
+        class FakeMpiExecutor:
+            def __init__(self, max_workers):
+                calls["max_workers"] = max_workers
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def map(self, func, jobs):
+                calls["job_count"] = len(jobs)
+                return [func(job) for job in jobs]
+
+        def fake_xfoil_job(job):
+            return job.result_from_table(
+                [
+                    [-8.0, -0.8, 0.04, 0.0, 0.0],
+                    [0.0, 0.0, 0.01, 0.0, 0.0],
+                    [15.0, 1.0, 0.05, 0.0, 0.0],
+                ]
+            )
+
+        with TemporaryDirectory() as tempdir:
+            with patch(
+                "pycopter.polars._get_mpi_pool_executor",
+                return_value=(FakeMpiExecutor, None),
+            ):
+                with patch("pycopter.polars._run_xfoil_polar_job", fake_xfoil_job):
+                    provider = XfoilPolarProvider(cache_directory=tempdir)
+                    provider.prepare_conditions(
+                        [
+                            ("naca0012", 100000.0, 0.1),
+                            ("naca0012", 150000.0, 0.1),
+                        ]
+                    )
+
+                    coeffs = provider.get_coefficients(
+                        "naca0012",
+                        5.0,
+                        100000.0,
+                        0.1,
+                    )
+
+        self.assertEqual(8, calls["max_workers"])
+        self.assertEqual(2, calls["job_count"])
+        self.assertGreater(coeffs.cl, 0.0)
+
+    def test_xfoil_provider_can_require_mpi_backend(self):
+        with patch(
+            "pycopter.polars._get_mpi_pool_executor",
+            return_value=(None, RuntimeError("no mpi runtime")),
+        ):
+            provider = XfoilPolarProvider(parallel_backend="mpi")
+            with self.assertRaises(RuntimeError):
+                provider.prepare_conditions(
+                    [
+                        ("naca0012", 100000.0, 0.1),
+                        ("naca0012", 150000.0, 0.1),
+                    ]
+                )
 
 
 class TestRealXfoilHover(unittest.TestCase):
