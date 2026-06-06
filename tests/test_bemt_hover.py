@@ -190,6 +190,14 @@ class TestXfoilProviderBounds(unittest.TestCase):
         provider.cleanup()
         self.assertFalse(provider.cache_directory.exists())
 
+    def test_xfoil_provider_cache_filename_stays_within_xfoil_limit(self):
+        provider = XfoilPolarProvider(alpha_min_deg=-10.0, alpha_max_deg=15.0)
+        cache_path = provider._cache_file_path("naca0012", 225000.0, 0.02)
+
+        self.assertEqual(".txt", cache_path.suffix)
+        self.assertLessEqual(len(cache_path.name), 32)
+        provider.cleanup()
+
     def test_xfoil_provider_caps_requested_alpha_to_15_degrees(self):
         calls = {}
 
@@ -389,6 +397,27 @@ class TestXfoilProviderBounds(unittest.TestCase):
 
 
 class TestRealXfoilHover(unittest.TestCase):
+    def test_reported_naca0012_low_mach_polar_filename_case_completes(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        xfoil_exe = repo_root / "data" / "XFOIL6.99" / "xfoil.exe"
+        if not xfoil_exe.exists():
+            self.skipTest("XFOIL executable is not available.")
+
+        provider = XfoilPolarProvider(
+            new_polar=True,
+            alpha_min_deg=-10.0,
+            alpha_max_deg=15.0,
+            reynolds_bin=25000.0,
+            mach_bin=0.02,
+            timeout=20,
+            parallel_backend="serial",
+        )
+
+        coeffs = provider.get_coefficients("naca0012", 5.0, 225000.0, 0.02)
+
+        self.assertGreater(coeffs.cl, 0.0)
+        provider.cleanup()
+
     def test_naca0012_hover_completes_with_xfoil_polars(self):
         repo_root = Path(__file__).resolve().parents[1]
         xfoil_exe = repo_root / "data" / "XFOIL6.99" / "xfoil.exe"
