@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
 
 import numpy as np
 
-from .xfoil import MAX_XFOIL_ALPHA_DEG, Xfoil, normalize_airfoil_name
+from .xfoil import MAX_XFOIL_ALPHA_DEG, Xfoil, get_repo_root, normalize_airfoil_name
 
 
 @dataclass(frozen=True)
@@ -126,8 +127,8 @@ class XfoilPolarProvider:
     XFOIL-backed polar source with coarse Re/Mach binning.
 
     The binning avoids regenerating a polar for tiny local-flow changes during
-    the nonlinear BEMT solve. XFOIL output is still cached only in memory here;
-    the existing mutable polar.txt side effect remains contained in xfoil.py.
+    the nonlinear BEMT solve. Generated polar files are stored per airfoil/Re/Mach
+    condition, then cached in memory for repeated lookup during the current solve.
     """
 
     def __init__(
@@ -138,6 +139,7 @@ class XfoilPolarProvider:
         reynolds_bin: float = 25000.0,
         mach_bin: float = 0.02,
         timeout: int = 60,
+        cache_directory: str | Path | None = None,
     ):
         self.new_polar = new_polar
         self.alpha_min_deg = alpha_min_deg
@@ -149,6 +151,11 @@ class XfoilPolarProvider:
         self.reynolds_bin = reynolds_bin
         self.mach_bin = mach_bin
         self.timeout = timeout
+        self.cache_directory = (
+            Path(cache_directory)
+            if cache_directory is not None
+            else get_repo_root() / "data" / "XFOIL6.99" / "polars"
+        )
         self._cache: dict[tuple[str, float, float], AirfoilPolar] = {}
 
     def get_coefficients(
@@ -182,7 +189,18 @@ class XfoilPolarProvider:
         return float(max(round(value / bin_size) * bin_size, bin_size))
 
     def _generate_polar(self, airfoil: str, reynolds: float, mach: float) -> AirfoilPolar:
-        xfoil = Xfoil(new_polar=True, timeout=self.timeout)
+        cache_path = self._cache_file_path(airfoil, reynolds, mach)
+        xfoil = Xfoil(new_polar=self.new_polar, timeout=self.timeout)
+        self._configure_xfoil_output(xfoil, cache_path)
+
+        if not self.new_polar and cache_path.exists():
+            return AirfoilPolar.from_xfoil_table(
+                airfoil,
+                reynolds,
+                mach,
+                xfoil.read_polar(),
+            )
+
         if not xfoil.simulate(
             airfoil,
             mach,
@@ -192,3 +210,30 @@ class XfoilPolarProvider:
         ):
             raise RuntimeError(xfoil.error_message)
         return AirfoilPolar.from_xfoil_table(airfoil, reynolds, mach, xfoil.read_polar())
+
+    def _cache_file_path(self, airfoil: str, reynolds: float, mach: float) -> Path:
+        reynolds_part = f"re{int(round(reynolds))}"
+        mach_part = f"m{self._safe_float_token(mach)}"
+        alpha_part = (
+            f"a{self._safe_float_token(self.alpha_min_deg)}_"
+            f"{self._safe_float_token(self.alpha_max_deg)}"
+        )
+        filename = f"{normalize_airfoil_name(airfoil)}_{reynolds_part}_{mach_part}_{alpha_part}.txt"
+        return self.cache_directory / filename
+
+    def _safe_float_token(self, value: float) -> str:
+        text = f"{value:.4g}".replace("-", "neg").replace(".", "p")
+        return text.replace("+", "")
+
+    def _configure_xfoil_output(self, xfoil: Xfoil, output_path: Path) -> None:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        xfoil.output_path = output_path
+        repo_root = getattr(xfoil, "repo_root", None)
+        if repo_root is None:
+            xfoil.output_path_for_xfoil = output_path.as_posix()
+            return
+        try:
+            relative_path = output_path.relative_to(repo_root)
+            xfoil.output_path_for_xfoil = relative_path.as_posix()
+        except ValueError:
+            xfoil.output_path_for_xfoil = output_path.as_posix()

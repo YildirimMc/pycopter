@@ -1,5 +1,6 @@
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from pycopter import Rotor
@@ -203,6 +204,82 @@ class TestXfoilProviderBounds(unittest.TestCase):
             provider.get_coefficients("naca0012", 5.0, 1000.0, 0.0)
 
         self.assertGreater(calls["reynolds"], 0.0)
+
+    def test_xfoil_provider_uses_per_condition_cache_files(self):
+        output_paths = []
+
+        class FakeXfoil:
+            error_message = ""
+
+            def __init__(self, new_polar=True, timeout=60):
+                self.new_polar = new_polar
+                self.timeout = timeout
+                self.repo_root = Path.cwd()
+                self.output_path = self.repo_root / "data" / "XFOIL6.99" / "polar.txt"
+                self.output_path_for_xfoil = "data/XFOIL6.99/polar.txt"
+
+            def simulate(self, airfoil, mach, reynolds, alpha_min_deg, alpha_max_deg):
+                output_paths.append(self.output_path)
+                self.output_path.parent.mkdir(parents=True, exist_ok=True)
+                self.output_path.write_text(
+                    "\n" * 12
+                    + "-8 0.0 0.01 0 0\n"
+                    + "0 0.0 0.01 0 0\n"
+                    + "15 1.0 0.05 0 0\n",
+                    encoding="utf-8",
+                )
+                return True
+
+            def read_polar(self):
+                import numpy as np
+
+                return np.genfromtxt(self.output_path, skip_header=12)
+
+        with TemporaryDirectory() as tempdir:
+            with patch("pycopter.polars.Xfoil", FakeXfoil):
+                provider = XfoilPolarProvider(cache_directory=tempdir)
+                provider.get_coefficients("naca0012", 5.0, 100000.0, 0.1)
+                provider.get_coefficients("naca0012", 5.0, 150000.0, 0.1)
+
+        self.assertEqual(2, len(output_paths))
+        self.assertNotEqual(output_paths[0], output_paths[1])
+        self.assertTrue(all(path.name != "polar.txt" for path in output_paths))
+
+    def test_xfoil_provider_reuses_disk_cache_when_new_polar_is_false(self):
+        class FakeXfoil:
+            error_message = ""
+
+            def __init__(self, new_polar=True, timeout=60):
+                self.new_polar = new_polar
+                self.timeout = timeout
+                self.repo_root = Path.cwd()
+                self.output_path = self.repo_root / "data" / "XFOIL6.99" / "polar.txt"
+                self.output_path_for_xfoil = "data/XFOIL6.99/polar.txt"
+
+            def simulate(self, airfoil, mach, reynolds, alpha_min_deg, alpha_max_deg):
+                raise AssertionError("new_polar=False should read the cache file")
+
+            def read_polar(self):
+                import numpy as np
+
+                return np.genfromtxt(self.output_path, skip_header=12)
+
+        with TemporaryDirectory() as tempdir:
+            provider = XfoilPolarProvider(new_polar=False, cache_directory=tempdir)
+            cache_path = provider._cache_file_path("naca0012", 100000.0, 0.1)
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_text(
+                "\n" * 12
+                + "-8 0.0 0.01 0 0\n"
+                + "0 0.0 0.01 0 0\n"
+                + "15 1.0 0.05 0 0\n",
+                encoding="utf-8",
+            )
+
+            with patch("pycopter.polars.Xfoil", FakeXfoil):
+                coeffs = provider.get_coefficients("naca0012", 5.0, 100000.0, 0.1)
+
+        self.assertGreater(coeffs.cl, 0.0)
 
 
 class TestRealXfoilHover(unittest.TestCase):
