@@ -585,15 +585,14 @@ class XfoilPolarProvider:
             if key in self._cache or key in queued_keys:
                 continue
             airfoil_key, reynolds_key, mach_key = key
-            if not self.new_polar:
-                cache_path = self._cache_file_path(airfoil_key, reynolds_key, mach_key)
-                if cache_path.exists():
-                    self._cache[key] = self._read_cached_polar(
-                        airfoil_key,
-                        reynolds_key,
-                        mach_key,
-                    )
-                    continue
+            cache_path = self._cache_file_path(airfoil_key, reynolds_key, mach_key)
+            if cache_path.exists():
+                self._cache[key] = self._read_cached_polar(
+                    airfoil_key,
+                    reynolds_key,
+                    mach_key,
+                )
+                continue
             jobs.append(self._create_job(airfoil_key, reynolds_key, mach_key))
             queued_keys.add(key)
 

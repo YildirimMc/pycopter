@@ -24,6 +24,7 @@ from .calculations import (
     CONFIG_VERSION,
     HoverCase,
     build_rotor_spec,
+    build_xfoil_provider,
     electric_summary,
     electric_range_sweep,
     estimate_forward_flight,
@@ -256,6 +257,8 @@ class PycopterWebApp:
         pn.extension("tabulator", raw_css=[RAW_CSS])
         self.current_case: HoverCase | None = None
         self.initialized_rotor = None
+        self._xfoil_provider = None
+        self._xfoil_provider_key: tuple[Any, ...] | None = None
         self.output_lines: list[str] = []
         self._log_render_count = 0
         self.plot_fig = self._blank_figure("Initialize rotor, then calculate hover.")
@@ -317,7 +320,7 @@ class PycopterWebApp:
         self.clear_output_btn = pn.widgets.Button(label="Clear Outputs", width=120)
 
         self.airfoil = pn.widgets.TextInput(label="Airfoil", value=cfg["airfoil"], width=270)
-        self.new_polars = pn.widgets.Checkbox(label="Generate New XFOIL Polars", value=cfg["new_polars"])
+        self.new_polars = pn.widgets.Checkbox(label="Generate Missing XFOIL Polars", value=cfg["new_polars"])
         self.rotor_system_type = pn.widgets.Select(
             label="Rotor System",
             options={"Single rotor": "single", "Coaxial": "coaxial"},
@@ -723,7 +726,11 @@ class PycopterWebApp:
     def _calculate_hover(self) -> None:
         try:
             config = self._current_config()
-            case = run_hover_case(config, self._station_rows())
+            case = run_hover_case(
+                config,
+                self._station_rows(),
+                polar_provider=self._xfoil_provider_for_config(config),
+            )
             self.current_case = case
             self._log("")
             self._log("Calculating Hover Conditions...")
@@ -1224,6 +1231,33 @@ class PycopterWebApp:
         self.calc_hover_btn.disabled = self.initialized_rotor is None
         self.generate_plot_btn.disabled = self.initialized_rotor is None and self.current_case is None
         self.calc_forward_btn.disabled = self.current_case is None or self.current_case.system_type != "single"
+
+    def _xfoil_provider_for_config(self, config: dict[str, Any]):
+        key = self._xfoil_provider_cache_key(config)
+        if self._xfoil_provider is None or self._xfoil_provider_key != key:
+            self._cleanup_xfoil_provider()
+            self._xfoil_provider = build_xfoil_provider(config)
+            self._xfoil_provider_key = key
+        return self._xfoil_provider
+
+    def _xfoil_provider_cache_key(self, config: dict[str, Any]) -> tuple[Any, ...]:
+        return (
+            bool(config["new_polars"]),
+            float(config["polar_alpha_min_deg"]),
+            float(config["polar_alpha_max_deg"]),
+            int(config["xfoil_parallel_workers"]),
+            str(config["xfoil_parallel_backend"]),
+            str(config.get("xfoil_cache_directory") or "").strip(),
+        )
+
+    def _cleanup_xfoil_provider(self) -> None:
+        if self._xfoil_provider is None:
+            return
+        cleanup = getattr(self._xfoil_provider, "cleanup", None)
+        if cleanup is not None:
+            cleanup()
+        self._xfoil_provider = None
+        self._xfoil_provider_key = None
 
     def _reset_station_rows_from_uniform(self) -> None:
         cfg = self._current_config()

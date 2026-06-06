@@ -1,5 +1,6 @@
 import json
 import unittest
+from unittest.mock import patch
 
 from pycopter.polars import LinearPolarProvider
 
@@ -118,6 +119,13 @@ class TestWebGuiCalculations(unittest.TestCase):
         self.assertFalse(provider.new_polar)
         provider.cleanup()
 
+    def test_gui_xfoil_provider_uses_stable_default_cache_directory(self):
+        provider = build_xfoil_provider({**self.config, "xfoil_cache_directory": ""})
+
+        self.assertEqual("gui-cache", provider.cache_directory.name)
+        self.assertEqual("tmp", provider.cache_directory.parent.name)
+        provider.cleanup()
+
     def test_uniform_geometry_uses_root_and_tip_twist_inputs(self):
         config = normalize_config(
             {
@@ -169,6 +177,37 @@ class TestWebGuiApp(unittest.TestCase):
 
         self.assertEqual("fossil", app._current_config()["propulsion_model"])
         self.assertNotIn("Electric Range vs Velocity", app.plot_select.options)
+
+    def test_reuses_xfoil_provider_for_non_xfoil_setting_changes(self):
+        app = PycopterWebApp()
+        first_provider = object()
+        second_provider = object()
+
+        with patch("gui.app.build_xfoil_provider", side_effect=[first_provider, second_provider]) as factory:
+            config = app._current_config()
+            self.assertIs(first_provider, app._xfoil_provider_for_config(config))
+            self.assertIs(
+                first_provider,
+                app._xfoil_provider_for_config(
+                    {
+                        **config,
+                        "coaxial_spacing_ratio": float(config["coaxial_spacing_ratio"]) + 0.1,
+                        "gross": float(config["gross"]) + 1.0,
+                    }
+                ),
+            )
+            self.assertEqual(1, factory.call_count)
+
+            self.assertIs(
+                second_provider,
+                app._xfoil_provider_for_config(
+                    {
+                        **config,
+                        "polar_alpha_max_deg": float(config["polar_alpha_max_deg"]) - 1.0,
+                    }
+                ),
+            )
+            self.assertEqual(2, factory.call_count)
 
 
 if __name__ == "__main__":

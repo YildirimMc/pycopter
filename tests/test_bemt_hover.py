@@ -360,6 +360,42 @@ class TestXfoilProviderBounds(unittest.TestCase):
 
         self.assertGreater(coeffs.cl, 0.0)
 
+    def test_xfoil_provider_reuses_disk_cache_when_new_polar_is_true(self):
+        class FakeXfoil:
+            error_message = ""
+
+            def __init__(self, new_polar=True, timeout=60):
+                self.new_polar = new_polar
+                self.timeout = timeout
+                self.repo_root = Path.cwd()
+                self.output_path = self.repo_root / "data" / "XFOIL6.99" / "polar.txt"
+                self.output_path_for_xfoil = "data/XFOIL6.99/polar.txt"
+
+            def simulate(self, airfoil, mach, reynolds, alpha_min_deg, alpha_max_deg):
+                raise AssertionError("Existing cache files should be reused before XFOIL runs")
+
+            def read_polar(self):
+                import numpy as np
+
+                return np.genfromtxt(self.output_path, skip_header=12)
+
+        with TemporaryDirectory() as tempdir:
+            provider = XfoilPolarProvider(new_polar=True, cache_directory=tempdir)
+            cache_path = provider._cache_file_path("naca0012", 100000.0, 0.1)
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_text(
+                "\n" * 12
+                + "-8 0.0 0.01 0 0\n"
+                + "0 0.0 0.01 0 0\n"
+                + "15 1.0 0.05 0 0\n",
+                encoding="utf-8",
+            )
+
+            with patch("pycopter.polars.Xfoil", FakeXfoil):
+                coeffs = provider.get_coefficients("naca0012", 5.0, 100000.0, 0.1)
+
+        self.assertGreater(coeffs.cl, 0.0)
+
     def test_xfoil_provider_prefetch_uses_mpi_executor_with_eight_workers(self):
         calls = {}
 

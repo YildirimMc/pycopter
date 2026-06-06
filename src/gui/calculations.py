@@ -32,6 +32,7 @@ GeometryMode = Literal["uniform", "station_table"]
 CONFIG_VERSION = 1
 SHP_PER_WATT = 0.00134102209
 MPS_TO_KMH = 3.6
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 DEFAULT_STATION_ROWS: list[dict[str, Any]] = [
@@ -291,13 +292,18 @@ def build_solver_settings(config: dict[str, Any]) -> HoverSolverSettings:
 
 def build_xfoil_provider(config: dict[str, Any]) -> XfoilPolarProvider:
     cache_directory = str(config.get("xfoil_cache_directory") or "").strip()
+    resolved_cache_directory = (
+        Path(cache_directory)
+        if cache_directory
+        else REPO_ROOT / "data" / "XFOIL6.99" / "tmp" / "gui-cache"
+    )
     return XfoilPolarProvider(
         new_polar=bool(config["new_polars"]),
         alpha_min_deg=float(config["polar_alpha_min_deg"]),
         alpha_max_deg=float(config["polar_alpha_max_deg"]),
         parallel_workers=int(config["xfoil_parallel_workers"]),
         parallel_backend=str(config["xfoil_parallel_backend"]),
-        cache_directory=Path(cache_directory) if cache_directory else None,
+        cache_directory=resolved_cache_directory,
     )
 
 
