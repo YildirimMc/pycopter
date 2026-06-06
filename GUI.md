@@ -84,8 +84,8 @@ typed endpoints above.
 | `min_collective_deg` | `HoverSolverSettings.min_collective_deg` | deg | `-10 to 10`; default `-5` | Lower collective search bound for target-thrust trim. |
 | `polar_alpha_min_deg` | `XfoilPolarProvider.alpha_min_deg` | deg | `-20 to 5`; default `-10` | Lower AoA bound for generated XFOIL polar tables. |
 | `polar_alpha_max_deg` | `XfoilPolarProvider.alpha_max_deg` | deg | `10-15`; default `15` | Upper AoA bound for generated XFOIL polar tables. Requests above 15 deg are capped because XFOIL often fails there and this is an estimator. |
-| `xfoil_parallel_workers` | `XfoilPolarProvider.parallel_workers` | count | `1-16`; default `8` | Maximum MPI workers used to generate independent missing XFOIL polar bins. Set `1` to force serial generation. |
-| `xfoil_parallel_backend` | `XfoilPolarProvider.parallel_backend` | enum | `auto`, `mpi`, `serial`; default `auto` | `auto` uses `mpi4py.futures` when an MPI runtime is available and falls back to serial. `mpi` raises if MS-MPI/Intel MPI is missing. |
+| `xfoil_parallel_workers` | `XfoilPolarProvider.parallel_workers` | count | `2-16`; default `8` | Maximum MPI workers used to generate independent missing XFOIL polar bins. Use `8` for the current hover workflow unless explicitly debugging. |
+| `xfoil_parallel_backend` | `XfoilPolarProvider.parallel_backend` | enum | `mpi`, `serial`; default `mpi` | `mpi` requires a working MPI runtime and runs missing XFOIL polar bins through `mpi4py.futures`. `serial` is only for explicit non-parallel debugging. |
 | `xfoil_cache_directory` | `XfoilPolarProvider.cache_directory` | path | optional; default provider-owned temp dir | Advanced override for generated polar files. Default is a short temporary folder under ignored `data/XFOIL6.99/tmp/`; do not point this at a tracked repo path. |
 | `tip_loss_model` | `HoverSolverSettings.tip_loss_model` | enum | `prandtl`, `none`; default `prandtl` | Enables Prandtl finite-blade tip loss. |
 | `root_loss_model` | `HoverSolverSettings.root_loss_model` | enum | `prandtl`, `none`; default `prandtl` | Enables Prandtl-style root loss near blade cutout. |
@@ -198,11 +198,10 @@ All coaxial outputs are on `CoaxialHoverResult`.
 - `HoverSolver` now asks compatible polar providers to prefetch radial
   airfoil/Re/Mach bins before element iterations. For `XfoilPolarProvider`,
   these missing bins are independent XFOIL runs.
-- With `xfoil_parallel_backend='auto'` and `xfoil_parallel_workers=8`, the
-  provider uses `mpi4py.futures.MPIPoolExecutor(max_workers=8)` when a working
-  MPI runtime is installed. On systems where `mpi4py` is installed but the MPI
-  DLL/runtime is missing, `auto` falls back to serial generation; choose
-  `xfoil_parallel_backend='mpi'` if the GUI should fail loudly instead.
+- With `xfoil_parallel_backend='mpi'` and `xfoil_parallel_workers=8`, the
+  provider uses `mpi4py.futures.MPIPoolExecutor(max_workers=8)`. A working MPI
+  runtime such as MS-MPI must be installed; missing runtime support is an error,
+  not an implicit serial fallback.
 - No new hover result fields were added by this change. The existing
   `alpha_clamped`, `reynolds`, `mach`, `cl`, `cd`, and `cm` outputs continue to
   expose the section data produced from generated polars.

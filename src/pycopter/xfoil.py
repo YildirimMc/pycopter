@@ -200,6 +200,7 @@ class Xfoil():
                 stderr=subprocess.PIPE,
                 stdin=subprocess.PIPE,
                 text=True,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         except OSError as err:
             self.error_message = f"ERROR - Could not start XFOIL: {err}"

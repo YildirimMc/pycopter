@@ -3,7 +3,13 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 import shutil
+import subprocess
+import sys
+import tempfile
+import traceback
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,7 +19,7 @@ import numpy as np
 
 from .xfoil import MAX_XFOIL_ALPHA_DEG, Xfoil, get_repo_root, normalize_airfoil_name
 
-ParallelBackend = Literal["auto", "mpi", "serial"]
+ParallelBackend = Literal["mpi", "serial"]
 
 
 class _ShortTemporaryDirectory:
@@ -169,13 +175,236 @@ class XfoilPolarJob:
         )
 
 
+def _job_to_payload(job: XfoilPolarJob) -> dict[str, object]:
+    return {
+        "airfoil": job.airfoil,
+        "reynolds": job.reynolds,
+        "mach": job.mach,
+        "alpha_min_deg": job.alpha_min_deg,
+        "alpha_max_deg": job.alpha_max_deg,
+        "new_polar": job.new_polar,
+        "timeout": job.timeout,
+        "cache_path": str(job.cache_path),
+    }
+
+
+def _job_from_payload(payload: dict[str, object]) -> XfoilPolarJob:
+    return XfoilPolarJob(
+        airfoil=str(payload["airfoil"]),
+        reynolds=float(payload["reynolds"]),
+        mach=float(payload["mach"]),
+        alpha_min_deg=float(payload["alpha_min_deg"]),
+        alpha_max_deg=float(payload["alpha_max_deg"]),
+        new_polar=bool(payload["new_polar"]),
+        timeout=int(payload["timeout"]),
+        cache_path=Path(str(payload["cache_path"])),
+    )
+
+
+def _result_to_payload(result: XfoilPolarJobResult) -> dict[str, object]:
+    return {
+        "airfoil": result.airfoil,
+        "reynolds": result.reynolds,
+        "mach": result.mach,
+        "table": result.table,
+    }
+
+
+def _result_from_payload(payload: dict[str, object]) -> XfoilPolarJobResult:
+    return XfoilPolarJobResult(
+        airfoil=str(payload["airfoil"]),
+        reynolds=float(payload["reynolds"]),
+        mach=float(payload["mach"]),
+        table=payload["table"],
+    )
+
+
 def _get_mpi_pool_executor():
     """Return mpi4py's executor class, or the import/runtime error."""
+    _ensure_mpi_runtime_path()
     try:
         from mpi4py.futures import MPIPoolExecutor
     except (ImportError, OSError, RuntimeError) as err:
         return None, err
     return MPIPoolExecutor, None
+
+
+def _ensure_mpi_runtime_path() -> None:
+    """Expose MS-MPI executables in processes started before PATH was refreshed."""
+    msmpi_bin = Path("C:/Program Files/Microsoft MPI/Bin")
+    if not msmpi_bin.exists():
+        return
+    path_parts = os.environ.get("PATH", "").split(os.pathsep)
+    if str(msmpi_bin) not in path_parts:
+        os.environ["PATH"] = str(msmpi_bin) + os.pathsep + os.environ.get("PATH", "")
+
+
+def _is_real_mpi4py_executor(executor_class) -> bool:
+    return getattr(executor_class, "__module__", "").startswith("mpi4py.")
+
+
+def _can_use_dynamic_mpi_spawn() -> bool:
+    # On Windows/MS-MPI, COMM_SELF.Spawn fails outside an MPI process manager.
+    # MPIPoolExecutor uses that spawn path, so use mpiexec workers instead.
+    return os.name != "nt"
+
+
+def _mpi_worker_environment() -> dict[str, str]:
+    _ensure_mpi_runtime_path()
+    env = os.environ.copy()
+    repo_root = get_repo_root()
+    path_entries = [str(repo_root / "src"), str(repo_root)]
+    existing_pythonpath = env.get("PYTHONPATH", "")
+    if existing_pythonpath:
+        path_entries.extend(existing_pythonpath.split(os.pathsep))
+
+    seen = set()
+    deduped = []
+    for entry in path_entries:
+        if entry and entry not in seen:
+            deduped.append(entry)
+            seen.add(entry)
+    env["PYTHONPATH"] = os.pathsep.join(deduped)
+    env["PYTHONUNBUFFERED"] = "1"
+    return env
+
+
+def _tail_process_text(text: str, max_chars: int = 4000) -> str:
+    text = text.strip()
+    if len(text) <= max_chars:
+        return text
+    return text[-max_chars:]
+
+
+def _mpi_batch_timeout_seconds(jobs: list[XfoilPolarJob], worker_count: int) -> int:
+    job_timeout = max((job.timeout for job in jobs), default=60)
+    waves = max(1, (len(jobs) + worker_count - 1) // worker_count)
+    return int(max(60, job_timeout * waves + 60))
+
+
+def _run_xfoil_jobs_with_mpiexec(
+    jobs: list[XfoilPolarJob],
+    max_workers: int,
+) -> list[XfoilPolarJobResult]:
+    _ensure_mpi_runtime_path()
+    mpiexec = shutil.which("mpiexec")
+    if mpiexec is None:
+        raise RuntimeError(
+            "MPI XFOIL polar generation was requested, but mpiexec was not found. "
+            "Install MS-MPI or Intel MPI, or set parallel_backend='serial' explicitly "
+            "for a non-parallel debug run."
+        )
+
+    worker_count = max(1, min(int(max_workers), len(jobs)))
+    with tempfile.TemporaryDirectory(prefix="pycopter-mpi-") as tempdir:
+        input_path = Path(tempdir) / "jobs.json"
+        output_path = Path(tempdir) / "results.json"
+        input_path.write_text(
+            json.dumps([_job_to_payload(job) for job in jobs]),
+            encoding="utf-8",
+        )
+        command = [
+            mpiexec,
+            "-n",
+            str(worker_count),
+            sys.executable,
+            "-m",
+            "pycopter.polars",
+            "--xfoil-mpi-worker",
+            str(input_path),
+            str(output_path),
+        ]
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=get_repo_root(),
+                env=_mpi_worker_environment(),
+                capture_output=True,
+                text=True,
+                timeout=_mpi_batch_timeout_seconds(jobs, worker_count),
+            )
+        except subprocess.TimeoutExpired as err:
+            raise RuntimeError(
+                f"MPI XFOIL polar generation timed out after {err.timeout} seconds."
+            ) from err
+
+        if completed.returncode != 0:
+            details = "\n".join(
+                part
+                for part in (
+                    _tail_process_text(completed.stdout),
+                    _tail_process_text(completed.stderr),
+                )
+                if part
+            )
+            raise RuntimeError(
+                "MPI XFOIL polar generation failed under mpiexec."
+                + (f"\n{details}" if details else "")
+            )
+        if not output_path.exists():
+            raise RuntimeError("MPI XFOIL polar generation did not produce results.")
+
+        payload = json.loads(output_path.read_text(encoding="utf-8"))
+        errors = payload.get("errors", [])
+        if errors:
+            first = errors[0]
+            raise RuntimeError(
+                "MPI XFOIL worker failed while generating a polar: "
+                f"{first.get('error', 'unknown error')}\n"
+                f"{first.get('traceback', '')}"
+            )
+        return [_result_from_payload(result) for result in payload["results"]]
+
+
+def _run_xfoil_mpi_worker_file(input_path: str, output_path: str) -> int:
+    from mpi4py import MPI
+
+    comm = MPI.COMM_WORLD
+    rank = comm.Get_rank()
+    size = comm.Get_size()
+
+    if rank == 0:
+        jobs_payload = json.loads(Path(input_path).read_text(encoding="utf-8"))
+    else:
+        jobs_payload = None
+    jobs_payload = comm.bcast(jobs_payload, root=0)
+
+    local_results = []
+    local_errors = []
+    for index, job_payload in enumerate(jobs_payload):
+        if index % size != rank:
+            continue
+        try:
+            result = _run_xfoil_polar_job(_job_from_payload(job_payload))
+            local_results.append((index, _result_to_payload(result)))
+        except Exception as err:  # pragma: no cover - reported to parent process.
+            local_errors.append(
+                {
+                    "index": index,
+                    "rank": rank,
+                    "error": f"{type(err).__name__}: {err}",
+                    "traceback": traceback.format_exc(),
+                }
+            )
+
+    gathered = comm.gather(
+        {"results": local_results, "errors": local_errors},
+        root=0,
+    )
+    if rank == 0:
+        combined_results = []
+        combined_errors = []
+        for worker_payload in gathered:
+            combined_results.extend(worker_payload["results"])
+            combined_errors.extend(worker_payload["errors"])
+        ordered_results = [
+            result for _, result in sorted(combined_results, key=lambda item: item[0])
+        ]
+        Path(output_path).write_text(
+            json.dumps({"results": ordered_results, "errors": combined_errors}),
+            encoding="utf-8",
+        )
+    return 0
 
 
 def _configure_xfoil_output_for_path(xfoil: Xfoil, output_path: Path) -> None:
@@ -269,12 +498,14 @@ class XfoilPolarProvider:
         new_polar: bool = True,
         alpha_min_deg: float = -10.0,
         alpha_max_deg: float = MAX_XFOIL_ALPHA_DEG,
-        reynolds_bin: float = 25000.0,
-        mach_bin: float = 0.02,
+        reynolds_bin: float = 100000.0,
+        mach_bin: float = 0.1,
+        max_reynolds: float = 1_000_000.0,
+        max_mach: float = 0.6,
         timeout: int = 60,
         cache_directory: str | Path | None = None,
         parallel_workers: int = 8,
-        parallel_backend: ParallelBackend = "auto",
+        parallel_backend: ParallelBackend = "mpi",
     ):
         self.new_polar = new_polar
         self.alpha_min_deg = alpha_min_deg
@@ -283,13 +514,23 @@ class XfoilPolarProvider:
             raise ValueError(
                 f"alpha_min_deg must be <= {MAX_XFOIL_ALPHA_DEG} deg for XFOIL runs."
             )
+        if reynolds_bin <= 0:
+            raise ValueError("reynolds_bin must be positive.")
+        if mach_bin <= 0:
+            raise ValueError("mach_bin must be positive.")
+        if max_reynolds <= 0:
+            raise ValueError("max_reynolds must be positive.")
+        if max_mach <= 0:
+            raise ValueError("max_mach must be positive.")
         self.reynolds_bin = reynolds_bin
         self.mach_bin = mach_bin
+        self.max_reynolds = max_reynolds
+        self.max_mach = max_mach
         self.timeout = timeout
         if parallel_workers < 1:
             raise ValueError("parallel_workers must be at least 1.")
-        if parallel_backend not in ("auto", "mpi", "serial"):
-            raise ValueError("parallel_backend must be 'auto', 'mpi', or 'serial'.")
+        if parallel_backend not in ("mpi", "serial"):
+            raise ValueError("parallel_backend must be 'mpi' or 'serial'.")
         self.parallel_workers = int(parallel_workers)
         self.parallel_backend = parallel_backend
         self._temporary_cache = None
@@ -370,10 +611,10 @@ class XfoilPolarProvider:
     ) -> tuple[str, float, float]:
         normalized = normalize_airfoil_name(airfoil)
         reynolds_key = self._round_to_positive_bin(
-            max(reynolds, 1000.0),
+            min(max(reynolds, 1000.0), self.max_reynolds),
             self.reynolds_bin,
         )
-        mach_key = self._round_to_bin(max(mach, 0.0), self.mach_bin)
+        mach_key = self._round_to_bin(min(max(mach, 0.0), self.max_mach), self.mach_bin)
         return (normalized, reynolds_key, mach_key)
 
     def _round_to_bin(self, value: float, bin_size: float) -> float:
@@ -420,15 +661,38 @@ class XfoilPolarProvider:
             and self.parallel_backend != "serial"
         ):
             executor_class, error = _get_mpi_pool_executor()
-            if executor_class is not None:
-                with executor_class(max_workers=self.parallel_workers) as executor:
+            if executor_class is not None and (
+                not _is_real_mpi4py_executor(executor_class)
+                or _can_use_dynamic_mpi_spawn()
+            ):
+                executor_kwargs = {}
+                if _is_real_mpi4py_executor(executor_class):
+                    repo_root = get_repo_root()
+                    executor_kwargs = {
+                        "main": False,
+                        "path": [str(repo_root / "src"), str(repo_root)],
+                        "wdir": str(repo_root),
+                        "env": _mpi_worker_environment(),
+                    }
+                with executor_class(
+                    max_workers=self.parallel_workers,
+                    **executor_kwargs,
+                ) as executor:
                     yield from executor.map(_run_xfoil_polar_job, jobs)
                 return
+            if executor_class is not None:
+                try:
+                    yield from _run_xfoil_jobs_with_mpiexec(jobs, self.parallel_workers)
+                    return
+                except RuntimeError as mpiexec_error:
+                    if self.parallel_backend == "mpi":
+                        raise mpiexec_error from error
+
             if self.parallel_backend == "mpi":
                 raise RuntimeError(
                     "MPI XFOIL polar generation was requested, but mpi4py could "
-                    "not load an MPI runtime. Install MS-MPI or Intel MPI, or use "
-                    "parallel_backend='auto'/'serial'."
+                    "not load an MPI runtime. Install MS-MPI or Intel MPI, or set "
+                    "parallel_backend='serial' explicitly for a non-parallel debug run."
                 ) from error
 
         for job in jobs:
@@ -454,3 +718,14 @@ class XfoilPolarProvider:
 
     def _configure_xfoil_output(self, xfoil: Xfoil, output_path: Path) -> None:
         _configure_xfoil_output_for_path(xfoil, output_path)
+
+
+def _main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if len(argv) == 3 and argv[0] == "--xfoil-mpi-worker":
+        return _run_xfoil_mpi_worker_file(argv[1], argv[2])
+    raise SystemExit("Usage: python -m pycopter.polars --xfoil-mpi-worker JOBS RESULTS")
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())

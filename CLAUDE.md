@@ -23,7 +23,8 @@
 - Coaxial hover is modeled as upper and lower rotor solves with a first-order upper-wake velocity/contraction estimate applied to the lower rotor. Treat it as a better initial estimator than total-blade-count shortcuts, not as a full free-wake model.
 - For scientific traceability, do not reintroduce hardcoded mean-drag curves as the primary model. Use local polar lookup or an explicit documented calibration path.
 - XFOIL polar generation is treated as scratch data. `XfoilPolarProvider` defaults to a provider-owned temporary cache under ignored `data/XFOIL6.99/tmp/`; generated polar files must not be committed.
-- `HoverSolver` prefetches radial airfoil/Re/Mach bins through compatible polar providers before element iterations. `XfoilPolarProvider` can distribute independent missing XFOIL jobs with `mpi4py.futures.MPIPoolExecutor(max_workers=8)` when an MPI runtime is installed; keep BEMT math deterministic and use read-only/interpolated polar tables inside the element solve.
+- `HoverSolver` prefetches radial airfoil/Re/Mach bins through compatible polar providers before element iterations. `XfoilPolarProvider` distributes independent missing XFOIL jobs with `mpi4py.futures.MPIPoolExecutor(max_workers=8)` by default; missing MPI runtime support is an installation error, not a reason to silently run serial.
+- User feedback has been explicit that broad refactors, hidden fallbacks, and test-only evidence are unacceptable for XFOIL/hover bugs. For this path, prioritize the smallest direct code change, install required runtime dependencies when possible, and verify by running the actual hover calculation while confirming concurrent XFOIL execution.
 
 ## Testing
 - Current tests are under `tests/` and use `unittest`, but they appear stale relative to the current `Rotor` API.

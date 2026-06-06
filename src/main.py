@@ -4,8 +4,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from pycopter import Rotor
-from gui import Ui_pycopter
-from gui.interface import Interface
+from gui_old import Ui_pycopter
+from gui_old.interface import Interface
 
 def main():
     app = QtWidgets.QApplication(sys.argv)

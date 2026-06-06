@@ -205,6 +205,7 @@ class HoverSolver:
             return load_zero
 
         high_velocity = max(0.1, 0.2 * rotor.tip_speed_m_s)
+        max_high_velocity = max(high_velocity, rotor.tip_speed_m_s)
         high_residual = residual_zero
         high_load = load_zero
         for _ in range(40):
@@ -219,7 +220,9 @@ class HoverSolver:
             )
             if high_residual <= 0.0:
                 break
-            high_velocity *= 2.0
+            if high_velocity >= max_high_velocity:
+                return high_load
+            high_velocity = min(high_velocity * 2.0, max_high_velocity)
         else:
             return high_load
 

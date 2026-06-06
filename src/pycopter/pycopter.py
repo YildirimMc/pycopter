@@ -83,7 +83,11 @@ class Rotor:
             speed_of_sound_m_s=speed_of_sound_m_s,
         )
         self.settings = solver_settings or HoverSolverSettings()
-        self.polar_provider = polar_provider or XfoilPolarProvider(new_polar=new_polar)
+        self.polar_provider = polar_provider or XfoilPolarProvider(
+            new_polar=new_polar,
+            parallel_workers=8,
+            parallel_backend="mpi",
+        )
         self.solver = HoverSolver(self.polar_provider, self.settings)
 
         self.r = self.spec.radius_m
