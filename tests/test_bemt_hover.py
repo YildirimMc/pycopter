@@ -1,4 +1,5 @@
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from pycopter import Rotor
@@ -176,6 +177,72 @@ class TestXfoilProviderBounds(unittest.TestCase):
         self.assertLessEqual(calls["alpha_max_deg"], 15.0)
         self.assertEqual(15.0, coeffs.alpha_deg)
         self.assertTrue(coeffs.alpha_clamped)
+
+    def test_xfoil_provider_never_rounds_reynolds_to_zero(self):
+        calls = {}
+
+        class FakeXfoil:
+            error_message = ""
+
+            def __init__(self, new_polar=True, timeout=60):
+                pass
+
+            def simulate(self, airfoil, mach, reynolds, alpha_min_deg, alpha_max_deg):
+                calls["reynolds"] = reynolds
+                return True
+
+            def read_polar(self):
+                return [
+                    [-8.0, -0.8, 0.04, 0.0, 0.0],
+                    [0.0, 0.0, 0.01, 0.0, 0.0],
+                    [15.0, 1.0, 0.05, 0.0, 0.0],
+                ]
+
+        with patch("pycopter.polars.Xfoil", FakeXfoil):
+            provider = XfoilPolarProvider(reynolds_bin=200000.0)
+            provider.get_coefficients("naca0012", 5.0, 1000.0, 0.0)
+
+        self.assertGreater(calls["reynolds"], 0.0)
+
+
+class TestRealXfoilHover(unittest.TestCase):
+    def test_naca0012_hover_completes_with_xfoil_polars(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        xfoil_exe = repo_root / "data" / "XFOIL6.99" / "xfoil.exe"
+        if not xfoil_exe.exists():
+            self.skipTest("XFOIL executable is not available.")
+
+        rotor = Rotor(
+            airfoil="naca0012",
+            num_blades=2,
+            chord=0.035,
+            rotor_diameter=0.7,
+            tip_speed_mach=0.265,
+            washout=-6.0,
+            rotor_root_cutout=0.12,
+            polar_provider=XfoilPolarProvider(
+                new_polar=True,
+                alpha_min_deg=-8.0,
+                alpha_max_deg=15.0,
+                reynolds_bin=200000.0,
+                mach_bin=0.1,
+                timeout=20,
+            ),
+            solver_settings=HoverSolverSettings(
+                blade_element_count=8,
+                min_collective_deg=-2.0,
+                max_collective_deg=15.0,
+                collective_tolerance_deg=0.05,
+                thrust_tolerance=0.03,
+            ),
+        )
+
+        rotor.hover(weight=1.0, density=1.225, n=8)
+
+        self.assertAlmostEqual(9.81, rotor.hover_thrust, delta=0.35)
+        self.assertGreater(rotor.hover_power_total, 0.0)
+        self.assertEqual(8, len(rotor.hover_result.element_loads))
+        self.assertFalse(any(load.alpha_clamped for load in rotor.hover_result.element_loads))
 
 
 if __name__ == "__main__":

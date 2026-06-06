@@ -78,7 +78,7 @@ typed endpoints above.
 | `max_collective_deg` | `HoverSolverSettings.max_collective_deg` | deg | `0-35`; default `20` | Upper collective search bound for target-thrust trim. |
 | `min_collective_deg` | `HoverSolverSettings.min_collective_deg` | deg | `-10 to 10`; default `-5` | Lower collective search bound for target-thrust trim. |
 | `polar_alpha_min_deg` | `XfoilPolarProvider.alpha_min_deg` | deg | `-20 to 5`; default `-10` | Lower AoA bound for generated XFOIL polar tables. |
-| `polar_alpha_max_deg` | `XfoilPolarProvider.alpha_max_deg` | deg | `10-30`; default `25` | Upper AoA bound for generated XFOIL polar tables. |
+| `polar_alpha_max_deg` | `XfoilPolarProvider.alpha_max_deg` | deg | `10-15`; default `15` | Upper AoA bound for generated XFOIL polar tables. Requests above 15 deg are capped because XFOIL often fails there and this is an estimator. |
 | `tip_loss_model` | `HoverSolverSettings.tip_loss_model` | enum | `prandtl`, `none`; default `prandtl` | Enables Prandtl finite-blade tip loss. |
 | `root_loss_model` | `HoverSolverSettings.root_loss_model` | enum | `prandtl`, `none`; default `prandtl` | Enables Prandtl-style root loss near blade cutout. |
 | `induced_power_factor` | `HoverSolverSettings.induced_power_factor` | factor | `1.0-1.3`; default `1.05` | Nonideal induced-power correction; set `1.0` for pure BEMT. |

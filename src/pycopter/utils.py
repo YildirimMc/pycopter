@@ -14,7 +14,7 @@ def find_nearest_idx(array, val):
 def find_interval_idx(array, val):
     """Returns the left index of the value found in an array."""
     idx = -1
-    for i in range(len(array-1)):
+    for i in range(len(array) - 1):
         if array[i][0] <= val < array[i+1][0]:
             idx = i
             break

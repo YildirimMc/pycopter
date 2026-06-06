@@ -12,6 +12,29 @@ from .polars import PolarProvider, XfoilPolarProvider
 from .utils import walds_solver
 
 
+class _LegacyPolarView:
+    """Compatibility adapter for old GUI code that expects rotor.polar."""
+
+    def __init__(self, rotor: "Rotor"):
+        self._rotor = rotor
+        self.reynolds = (
+            rotor.tip_speed
+            * 0.5
+            * rotor.chord
+            / 1.5e-5
+        )
+        self.mach = rotor.tip_speed_mach * 0.5
+
+    def get_polar(self, alfa):
+        coeffs = self._rotor.polar_provider.get_coefficients(
+            self._rotor.airfoil,
+            float(alfa),
+            self.reynolds,
+            self.mach,
+        )
+        return coeffs.cl, coeffs.cd
+
+
 class Rotor:
     """
     Backward-compatible facade for the station-based BEMT solver.
@@ -71,6 +94,7 @@ class Rotor:
         self.tip_speed_mach = self.spec.tip_speed_mach
         self.rotor_disk_area = self.spec.disk_area_m2
         self.solidity = self.spec.solidity
+        self.polar = _LegacyPolarView(self)
         self.is_hovered = False
 
         print("\nInitializing rotor...")

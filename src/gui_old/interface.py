@@ -451,7 +451,7 @@ class Interface():
     def plot_alpha_cl_cd(self):
         airfoil = self.ui.airfoilText.toPlainText().lower()
         
-        alfa_arr = np.arange(-5, 20)
+        alfa_arr = np.arange(-5, 16)
         cl_cd_arr = np.empty((len(alfa_arr), 2))
         for i, alfa in enumerate(alfa_arr):
             cl_cd_arr[i] = self.rotor.polar.get_polar(alfa)

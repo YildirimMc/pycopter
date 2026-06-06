@@ -8,6 +8,7 @@ from urllib.request import Request, urlopen
 
 UIUC_COORD_BASE_URL = "https://m-selig.ae.illinois.edu/ads/coord"
 AIRFOIL_NAME_RE = re.compile(r"^[a-z0-9_.-]+$")
+MAX_XFOIL_ALPHA_DEG = 15
 
 
 def get_repo_root():
@@ -130,7 +131,7 @@ class Xfoil():
         self.exe_path = self.repo_root / "data" / "XFOIL6.99" / "xfoil.exe"
         self.output_path = self.repo_root / "data" / "XFOIL6.99" / "polar.txt"
         self.output_path_for_xfoil = "data/XFOIL6.99/polar.txt"
-        self.max_theta = 15
+        self.max_theta = MAX_XFOIL_ALPHA_DEG
         self.timeout = timeout
         self.error_message = ""
         
@@ -157,6 +158,13 @@ class Xfoil():
         if self.new_polar and os.path.exists(self.output_path):
             os.remove(self.output_path)
 
+        if reynolds <= 0:
+            self.error_message = "ERROR - XFOIL Reynolds number must be positive."
+            return False
+        if mach < 0:
+            self.error_message = "ERROR - XFOIL Mach number must not be negative."
+            return False
+
         airfoil_commands, error_message = get_airfoil_commands(airfoil, self.repo_root)
         if airfoil_commands is None:
             self.error_message = f"ERROR - {error_message}"
@@ -173,9 +181,14 @@ class Xfoil():
             "",
         ]
         if alpha_max_deg is None:
-            alpha_max_deg = self.max_theta + 5
+            alpha_max_deg = self.max_theta
         alpha_min = int(round(alpha_min_deg))
-        alpha_max = int(round(alpha_max_deg))
+        alpha_max = min(int(round(alpha_max_deg)), self.max_theta)
+        if alpha_min > alpha_max:
+            self.error_message = (
+                f"ERROR - XFOIL alpha range must end at or below {self.max_theta} deg."
+            )
+            return False
         inputs = [f"alfa {alfa}" for alfa in range(alpha_min, alpha_max + 1)]
         command = "\n".join(inputs_init + inputs + ["pacc", "", "quit"]) + "\n"
 

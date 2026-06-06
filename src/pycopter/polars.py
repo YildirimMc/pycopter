@@ -7,7 +7,7 @@ from typing import Protocol
 
 import numpy as np
 
-from .xfoil import Xfoil, normalize_airfoil_name
+from .xfoil import MAX_XFOIL_ALPHA_DEG, Xfoil, normalize_airfoil_name
 
 
 @dataclass(frozen=True)
@@ -134,14 +134,18 @@ class XfoilPolarProvider:
         self,
         new_polar: bool = True,
         alpha_min_deg: float = -10.0,
-        alpha_max_deg: float = 25.0,
+        alpha_max_deg: float = MAX_XFOIL_ALPHA_DEG,
         reynolds_bin: float = 25000.0,
         mach_bin: float = 0.02,
         timeout: int = 60,
     ):
         self.new_polar = new_polar
         self.alpha_min_deg = alpha_min_deg
-        self.alpha_max_deg = alpha_max_deg
+        self.alpha_max_deg = min(alpha_max_deg, MAX_XFOIL_ALPHA_DEG)
+        if self.alpha_min_deg > self.alpha_max_deg:
+            raise ValueError(
+                f"alpha_min_deg must be <= {MAX_XFOIL_ALPHA_DEG} deg for XFOIL runs."
+            )
         self.reynolds_bin = reynolds_bin
         self.mach_bin = mach_bin
         self.timeout = timeout
@@ -155,7 +159,10 @@ class XfoilPolarProvider:
         mach: float,
     ) -> AirfoilCoefficients:
         normalized = normalize_airfoil_name(airfoil)
-        reynolds_key = self._round_to_bin(max(reynolds, 1000.0), self.reynolds_bin)
+        reynolds_key = self._round_to_positive_bin(
+            max(reynolds, 1000.0),
+            self.reynolds_bin,
+        )
         mach_key = self._round_to_bin(max(mach, 0.0), self.mach_bin)
         key = (normalized, reynolds_key, mach_key)
         if key not in self._cache:
@@ -166,6 +173,13 @@ class XfoilPolarProvider:
         if bin_size <= 0:
             return float(value)
         return float(round(value / bin_size) * bin_size)
+
+    def _round_to_positive_bin(self, value: float, bin_size: float) -> float:
+        if value <= 0:
+            raise ValueError("value must be positive for positive binning.")
+        if bin_size <= 0:
+            return float(value)
+        return float(max(round(value / bin_size) * bin_size, bin_size))
 
     def _generate_polar(self, airfoil: str, reynolds: float, mach: float) -> AirfoilPolar:
         xfoil = Xfoil(new_polar=True, timeout=self.timeout)
