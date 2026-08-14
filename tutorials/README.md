@@ -1,4 +1,9 @@
-## Tutorial
+## Tutorial (legacy desktop GUI)
+
+> **This page describes the original PyQt desktop GUI in `src/gui_old/`.**
+> For the supported Web UI, see [docs/TUTORIAL.md](../docs/TUTORIAL.md). The
+> preset configurations in [`presets/`](presets/) still load in the Web UI —
+> legacy fields are migrated automatically.
 
 #### Start the Graphical User Interface
 

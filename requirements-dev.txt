@@ -1,0 +1,15 @@
+# Development and test dependencies, on top of requirements.txt.
+#     .venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+#     .venv\Scripts\python.exe -m playwright install chromium
+#
+# Playwright drives the headless browser checks in
+# tests/test_web_gui_browser.py and scripts/capture_screenshots.py. Those tests
+# skip themselves when it is missing, so the rest of the suite still runs.
+
+-r requirements.txt
+
+playwright>=1.40
+
+# Only needed to run the legacy PyQt desktop GUI in src/gui_old via src/main.py.
+# The supported interface is the Web UI; see README.md.
+PyQt5>=5.15,<6

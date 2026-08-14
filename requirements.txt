@@ -1,0 +1,19 @@
+# Runtime dependencies for the PyCopter Web UI and calculation core.
+# Install into a local virtual environment:
+#     python -m venv .venv
+#     .venv\Scripts\python.exe -m pip install -r requirements.txt
+#
+# Verified on Windows with Python 3.13.6.
+
+panel>=1.9,<2
+matplotlib>=3.8,<4
+numpy>=1.26,<3
+pandas>=2.1,<4
+scipy>=1.11,<2
+pillow>=10,<14
+
+# XFOIL polar generation distributes independent runs over MPI workers.
+# On Windows this needs the Microsoft MPI runtime (msmpisetup.exe) installed
+# first: https://learn.microsoft.com/en-us/message-passing-interface/microsoft-mpi
+# Without an MPI runtime, set the XFOIL Backend field to "Serial debug".
+mpi4py>=3.1,<5
