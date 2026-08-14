@@ -233,6 +233,28 @@ All coaxial outputs are on `CoaxialHoverResult`.
   trim settings while sweeping `coaxial_spacing_ratio` linearly from `z/R=0.05`
   to `z/R=1.50`.
 
+## Layout And Sizing Contract
+
+- The dashboard is a fixed-height app shell that fills the browser viewport. The
+  toolbar and run log are pinned; the two input columns and the result area
+  divide the space between them.
+- Each input column scrolls internally. Opening `Background Solver Settings`,
+  `XFOIL Polar Generation`, or `Coaxial Settings` must not change the page
+  height, the result area size, or the position of any other region.
+- Input columns are fixed at `INPUT_COLUMN_WIDTH` because they hold fixed-width
+  form controls. The result area takes all remaining width, so a larger monitor
+  yields a larger plot rather than empty margin. Below roughly 1420 px of
+  viewport width the body scrolls horizontally instead of clipping.
+- The plot picker and `Generate Plot` sit directly above the result tabs, with
+  the plot they drive, not in the input columns.
+- Matplotlib figures are rendered at the measured on-screen size of the plot
+  frame, not at a fixed `figsize`. `ResultAreaProbe` reports that size from the
+  browser because Panel cannot; figures rasterize at 1.5x the CSS pixel size so
+  they stay sharp on high-density displays while axis text keeps its true size.
+- Window resizing does not regenerate sweep plots, because each one re-runs the
+  hover solver many times. The existing image is kept inside the frame by CSS
+  until the next `Generate Plot` or hover calculation redraws it.
+
 ## XFOIL Cache And Parallelism
 
 - `HoverSolver` now asks compatible polar providers to prefetch radial
