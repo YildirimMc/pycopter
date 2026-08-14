@@ -494,6 +494,7 @@ class HoverSolver:
         power_W = induced_power_W + profile_power_W
         total_torque_Nm = power_W / rotor.omega_rad_s if rotor.omega_rad_s else 0.0
         per_blade_torque_Nm = total_torque_Nm / rotor.num_blades
+        aircraft_yaw_torque_Nm = -rotor.rotation_direction * total_torque_Nm
 
         positive_thrust = max(total_thrust_N, 0.0)
         ideal_power_W = (
@@ -533,6 +534,7 @@ class HoverSolver:
             per_blade_thrust_N=per_blade_thrust_N,
             total_torque_Nm=total_torque_Nm,
             per_blade_torque_Nm=per_blade_torque_Nm,
+            aircraft_yaw_torque_Nm=aircraft_yaw_torque_Nm,
             power_W=power_W,
             induced_power_W=induced_power_W,
             profile_power_W=profile_power_W,
@@ -560,7 +562,21 @@ def solve_coaxial_hover(
     solver = HoverSolver(polar_provider, settings)
     lower_rotor = coaxial_spec.resolved_lower_rotor
 
-    if coaxial_spec.trim_mode == "equal_thrust":
+    if coaxial_spec.trim_mode == "torque_balance":
+        (
+            upper,
+            lower,
+            isolated_upper,
+            isolated_lower,
+            wake_radius,
+            wake_velocity,
+        ) = _solve_torque_balanced_coaxial_hover(
+            solver,
+            coaxial_spec,
+            operating_point,
+            lower_rotor,
+        )
+    elif coaxial_spec.trim_mode == "equal_thrust":
         target_each = operating_point.required_thrust_N / 2.0
         rotor_point = replace(operating_point, target_thrust_N=target_each, gross_mass_kg=None)
         upper = solver.solve(coaxial_spec.upper_rotor, rotor_point)
@@ -601,6 +617,9 @@ def solve_coaxial_hover(
         isolated_lower = solver.solve(lower_rotor, lower_point)
 
     total_power_W = upper.power_W + lower.power_W
+    net_aircraft_yaw_torque_Nm = (
+        upper.aircraft_yaw_torque_Nm + lower.aircraft_yaw_torque_Nm
+    )
     isolated_power_W = isolated_upper.power_W + isolated_lower.power_W
     interference_delta_W = total_power_W - isolated_power_W
     interference_loss_ratio = (
@@ -619,11 +638,254 @@ def solve_coaxial_hover(
         isolated_lower=isolated_lower,
         total_thrust_N=upper.total_thrust_N + lower.total_thrust_N,
         total_power_W=total_power_W,
+        net_aircraft_yaw_torque_Nm=net_aircraft_yaw_torque_Nm,
         interference_power_delta_W=interference_delta_W,
         interference_loss_ratio=interference_loss_ratio,
         lower_external_velocity_mean_m_s=lower_external_mean,
         wake_radius_m=wake_radius,
         wake_velocity_m_s=wake_velocity,
+    )
+
+
+def _solve_torque_balanced_coaxial_hover(
+    solver: HoverSolver,
+    coaxial_spec: CoaxialSpec,
+    operating_point: OperatingPoint,
+    lower_rotor: RotorSpec,
+) -> tuple[HoverResult, HoverResult, HoverResult, HoverResult, float, float]:
+    upper_guess, lower_guess = _equal_thrust_collective_guess(
+        solver,
+        coaxial_spec,
+        operating_point,
+        lower_rotor,
+    )
+    upper, lower, wake_radius, wake_velocity = _solve_collective_pair_for_trim(
+        solver,
+        coaxial_spec,
+        operating_point,
+        lower_rotor,
+        upper_guess.collective_pitch_deg,
+        lower_guess.collective_pitch_deg,
+        apply_upper_wake=True,
+    )
+    isolated_upper, isolated_lower, _, _ = _solve_collective_pair_for_trim(
+        solver,
+        coaxial_spec,
+        operating_point,
+        lower_rotor,
+        upper_guess.collective_pitch_deg,
+        upper_guess.collective_pitch_deg,
+        apply_upper_wake=False,
+    )
+    return upper, lower, isolated_upper, isolated_lower, wake_radius, wake_velocity
+
+
+def _equal_thrust_collective_guess(
+    solver: HoverSolver,
+    coaxial_spec: CoaxialSpec,
+    operating_point: OperatingPoint,
+    lower_rotor: RotorSpec,
+) -> tuple[HoverResult, HoverResult]:
+    target_each = operating_point.required_thrust_N / 2.0
+    rotor_point = replace(operating_point, target_thrust_N=target_each, gross_mass_kg=None)
+    upper = solver.solve(coaxial_spec.upper_rotor, rotor_point)
+    wake_radius, wake_velocity = _upper_wake_at_lower_rotor(
+        coaxial_spec.upper_rotor,
+        upper,
+        coaxial_spec.spacing_ratio,
+    )
+
+    def lower_external_velocity(r_m: float) -> float:
+        return wake_velocity if r_m <= wake_radius else 0.0
+
+    lower = solver.solve(lower_rotor, rotor_point, lower_external_velocity)
+    return upper, lower
+
+
+def _solve_collective_pair_for_trim(
+    solver: HoverSolver,
+    coaxial_spec: CoaxialSpec,
+    operating_point: OperatingPoint,
+    lower_rotor: RotorSpec,
+    upper_collective_deg: float,
+    lower_collective_deg: float,
+    *,
+    apply_upper_wake: bool,
+) -> tuple[HoverResult, HoverResult, float, float]:
+    target_thrust_N = operating_point.required_thrust_N
+    lower_bound = -45.0
+    upper_bound = 45.0
+    step_deg = 0.25
+    best = _evaluate_collective_pair(
+        solver,
+        coaxial_spec,
+        operating_point,
+        lower_rotor,
+        upper_collective_deg,
+        lower_collective_deg,
+        apply_upper_wake=apply_upper_wake,
+    )
+    best_norm = _coaxial_trim_norm(best, target_thrust_N)
+
+    for _ in range(min(solver.settings.max_trim_iterations, 30)):
+        thrust_error, yaw_error = _coaxial_trim_errors(best, target_thrust_N)
+        torque_scale = max(
+            abs(best[0].total_torque_Nm) + abs(best[1].total_torque_Nm),
+            1.0,
+        )
+        if (
+            abs(thrust_error) <= solver.settings.thrust_tolerance * target_thrust_N
+            and abs(yaw_error) <= max(1e-4, 1e-3 * torque_scale)
+        ):
+            return best
+
+        upper_step = _evaluate_collective_pair(
+            solver,
+            coaxial_spec,
+            operating_point,
+            lower_rotor,
+            min(upper_bound, upper_collective_deg + step_deg),
+            lower_collective_deg,
+            apply_upper_wake=apply_upper_wake,
+        )
+        lower_step = _evaluate_collective_pair(
+            solver,
+            coaxial_spec,
+            operating_point,
+            lower_rotor,
+            upper_collective_deg,
+            min(upper_bound, lower_collective_deg + step_deg),
+            apply_upper_wake=apply_upper_wake,
+        )
+        upper_errors = _coaxial_trim_errors(upper_step, target_thrust_N)
+        lower_errors = _coaxial_trim_errors(lower_step, target_thrust_N)
+
+        a = (upper_errors[0] - thrust_error) / step_deg
+        b = (lower_errors[0] - thrust_error) / step_deg
+        c = (upper_errors[1] - yaw_error) / step_deg
+        d = (lower_errors[1] - yaw_error) / step_deg
+        determinant = a * d - b * c
+        if abs(determinant) < 1e-9:
+            break
+
+        delta_upper = (-thrust_error * d + b * yaw_error) / determinant
+        delta_lower = (c * thrust_error - a * yaw_error) / determinant
+        max_step = 4.0
+        largest = max(abs(delta_upper), abs(delta_lower), 1.0)
+        if largest > max_step:
+            scale = max_step / largest
+            delta_upper *= scale
+            delta_lower *= scale
+
+        accepted = None
+        accepted_norm = None
+        for damping in (1.0, 0.5, 0.25, 0.1):
+            candidate_upper = min(
+                upper_bound,
+                max(lower_bound, upper_collective_deg + damping * delta_upper),
+            )
+            candidate_lower = min(
+                upper_bound,
+                max(lower_bound, lower_collective_deg + damping * delta_lower),
+            )
+            candidate = _evaluate_collective_pair(
+                solver,
+                coaxial_spec,
+                operating_point,
+                lower_rotor,
+                candidate_upper,
+                candidate_lower,
+                apply_upper_wake=apply_upper_wake,
+            )
+            candidate_norm = _coaxial_trim_norm(candidate, target_thrust_N)
+            if candidate_norm < best_norm or accepted is None:
+                accepted = candidate
+                accepted_norm = candidate_norm
+            if candidate_norm < best_norm:
+                break
+
+        if accepted is None or accepted_norm is None or accepted_norm >= best_norm:
+            break
+        best = accepted
+        best_norm = accepted_norm
+        upper_collective_deg = best[0].collective_pitch_deg
+        lower_collective_deg = best[1].collective_pitch_deg
+
+    thrust_error, yaw_error = _coaxial_trim_errors(best, target_thrust_N)
+    torque_scale = max(abs(best[0].total_torque_Nm) + abs(best[1].total_torque_Nm), 1.0)
+    if (
+        abs(thrust_error) > 5.0 * solver.settings.thrust_tolerance * target_thrust_N
+        or abs(yaw_error) > max(1e-3, 5e-3 * torque_scale)
+    ):
+        raise ValueError("Torque-balanced coaxial trim did not converge.")
+    return best
+
+
+def _evaluate_collective_pair(
+    solver: HoverSolver,
+    coaxial_spec: CoaxialSpec,
+    operating_point: OperatingPoint,
+    lower_rotor: RotorSpec,
+    upper_collective_deg: float,
+    lower_collective_deg: float,
+    *,
+    apply_upper_wake: bool,
+) -> tuple[HoverResult, HoverResult, float, float]:
+    upper = solver.solve_fixed_collective(
+        coaxial_spec.upper_rotor,
+        _fixed_collective_point(operating_point, upper_collective_deg),
+        upper_collective_deg,
+    )
+    if apply_upper_wake:
+        wake_radius, wake_velocity = _upper_wake_at_lower_rotor(
+            coaxial_spec.upper_rotor,
+            upper,
+            coaxial_spec.spacing_ratio,
+        )
+    else:
+        wake_radius, wake_velocity = coaxial_spec.upper_rotor.radius_m, 0.0
+
+    def lower_external_velocity(r_m: float) -> float:
+        return wake_velocity if apply_upper_wake and r_m <= wake_radius else 0.0
+
+    lower = solver.solve_fixed_collective(
+        lower_rotor,
+        _fixed_collective_point(operating_point, lower_collective_deg),
+        lower_collective_deg,
+        lower_external_velocity,
+    )
+    return upper, lower, wake_radius, wake_velocity
+
+
+def _coaxial_trim_errors(
+    pair: tuple[HoverResult, HoverResult, float, float],
+    target_thrust_N: float,
+) -> tuple[float, float]:
+    upper, lower, _, _ = pair
+    return (
+        upper.total_thrust_N + lower.total_thrust_N - target_thrust_N,
+        upper.aircraft_yaw_torque_Nm + lower.aircraft_yaw_torque_Nm,
+    )
+
+
+def _coaxial_trim_norm(
+    pair: tuple[HoverResult, HoverResult, float, float],
+    target_thrust_N: float,
+) -> float:
+    thrust_error, yaw_error = _coaxial_trim_errors(pair, target_thrust_N)
+    upper, lower, _, _ = pair
+    torque_scale = max(abs(upper.total_torque_Nm) + abs(lower.total_torque_Nm), 1.0)
+    return abs(thrust_error) / max(target_thrust_N, 1e-9) + abs(yaw_error) / torque_scale
+
+
+def _fixed_collective_point(
+    operating_point: OperatingPoint,
+    collective_pitch_deg: float,
+) -> OperatingPoint:
+    return replace(
+        operating_point,
+        trim_mode="fixed_collective",
+        collective_pitch_deg=collective_pitch_deg,
     )
 
 

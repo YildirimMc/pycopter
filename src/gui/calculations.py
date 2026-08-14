@@ -36,10 +36,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 DEFAULT_STATION_ROWS: list[dict[str, Any]] = [
-    {"r_over_R": 0.12, "chord_m": 0.035, "twist_deg": 10.0, "airfoil": "naca0012", "pitch_axis_frac": 0.25},
-    {"r_over_R": 0.45, "chord_m": 0.035, "twist_deg": 6.6, "airfoil": "naca0012", "pitch_axis_frac": 0.25},
-    {"r_over_R": 0.75, "chord_m": 0.033, "twist_deg": 3.5, "airfoil": "naca0012", "pitch_axis_frac": 0.25},
-    {"r_over_R": 1.00, "chord_m": 0.030, "twist_deg": 1.0, "airfoil": "naca0012", "pitch_axis_frac": 0.25},
+    {"r_over_R": 0.12, "chord_m": 0.035, "twist_deg": 10.0, "airfoil": "", "pitch_axis_frac": 0.25},
+    {"r_over_R": 0.45, "chord_m": 0.035, "twist_deg": 6.6, "airfoil": "", "pitch_axis_frac": 0.25},
+    {"r_over_R": 0.75, "chord_m": 0.033, "twist_deg": 3.5, "airfoil": "", "pitch_axis_frac": 0.25},
+    {"r_over_R": 1.00, "chord_m": 0.030, "twist_deg": 1.0, "airfoil": "", "pitch_axis_frac": 0.25},
 ]
 
 
@@ -85,8 +85,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "velocity_kmh": 40.0,
     "fpa": 0.05,
     "coaxial_spacing_ratio": 0.25,
-    "coaxial_trim_mode": "equal_thrust",
+    "coaxial_trim_mode": "torque_balance",
     "lower_collective_offset_deg": 0.0,
+    "lower_rotor_speed_ratio": 1.0,
     "lower_rotor_scale": 1.0,
 }
 
@@ -191,7 +192,7 @@ def station_rows_from_uniform(config: dict[str, Any], station_count: int = 4) ->
                 "r_over_R": float(r_over_R),
                 "chord_m": float(config["chord"]),
                 "twist_deg": root_twist + (tip_twist - root_twist) * float(span_fraction),
-                "airfoil": config["airfoil"],
+                "airfoil": "",
                 "pitch_axis_frac": 0.25,
             }
         )
@@ -210,7 +211,8 @@ def build_stations(rows: list[dict[str, Any]], global_airfoil: str) -> list[Blad
             raise ValueError("Blade station r/R values must be monotonic ascending and unique.")
         previous_r = r_over_R
 
-        airfoil = str(row.get("airfoil") or global_airfoil).strip().lower()
+        row_airfoil = str(row.get("airfoil") or "").strip()
+        airfoil = validate_airfoil(row_airfoil) if row_airfoil else global_airfoil
         stations.append(
             BladeStation(
                 r_over_R=r_over_R,
@@ -229,10 +231,13 @@ def build_rotor_spec(
     *,
     name: str = "rotor",
     scale: float = 1.0,
+    headspeed_ratio: float = 1.0,
     rotation_direction: int = 1,
 ) -> RotorSpec:
     airfoil = validate_airfoil(str(config["airfoil"]))
-    headspeed_rpm = float(config["headspeed_rpm"])
+    if headspeed_ratio <= 0.0:
+        raise ValueError("headspeed_ratio must be positive.")
+    headspeed_rpm = float(config["headspeed_rpm"]) * float(headspeed_ratio)
     tip_speed_mach = None
 
     if config["geometry_mode"] == "uniform":
@@ -325,6 +330,7 @@ def run_hover_case(
             station_rows,
             name="lower",
             scale=float(config["lower_rotor_scale"]),
+            headspeed_ratio=float(config["lower_rotor_speed_ratio"]),
             rotation_direction=-1,
         )
         result = solve_coaxial_hover(

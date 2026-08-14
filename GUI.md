@@ -56,7 +56,7 @@ typed endpoints above.
 
 | GUI key | Endpoint | Units | Range / default | Description |
 |---|---|---:|---|---|
-| `airfoil` | `RotorSpec.airfoil`, `BladeStation.airfoil` | text | default `naca0012` | NACA or UIUC airfoil name. Station airfoil overrides global airfoil. |
+| `airfoil` | `RotorSpec.airfoil`, `BladeStation.airfoil` | text | default `naca0012` | NACA or UIUC airfoil name. Blank station airfoil cells inherit this global airfoil; nonblank station cells intentionally override it. |
 | `num_blades` | `RotorSpec.num_blades` | count | `1-12`, default `2` for drones | Number of blades on one rotor, not total aircraft blades. |
 | `chord` | `RotorSpec.from_uniform_blade(chord_m=...)` | m | `0.001-2.5`, default project/preset value | Uniform chord fallback when no station table is used. |
 | `rotor_diam` | `RotorSpec.rotor_diameter_m` | m | `0.05-30`, default project/preset value | Rotor disk diameter. |
@@ -73,7 +73,7 @@ typed endpoints above.
 | GUI key | Endpoint | Units | Range / default | Description |
 |---|---|---:|---|---|
 | `rotor_system_type` | GUI branch to `HoverSolver.solve` or `solve_coaxial_hover` | enum | `single`, `coaxial`; default `single` | Selects single rotor or stacked coaxial calculation. |
-| `headspeed_rpm` | `RotorSpec.headspeed_rpm` | rpm | `100-100000`; default derived from tip Mach | Direct rotor speed input. Preferred for sub-10 kg electric drones. |
+| `headspeed_rpm` | upper/reference `RotorSpec.headspeed_rpm` | rpm | `100-100000`; default derived from tip Mach | Direct rotor speed input. In coaxial mode this is the upper/reference rotor RPM; the lower rotor can follow a separate gear ratio. |
 | `root_twist_deg` | `BladeStation.twist_deg` via uniform quick-entry | deg | `-30 to 30`; default `10` | Built-in pitch/twist at the first blade station for uniform quick-entry. |
 | `tip_twist_deg` | `BladeStation.twist_deg` via uniform quick-entry | deg | `-30 to 30`; default `1` | Built-in pitch/twist at the blade tip for uniform quick-entry. |
 | `headspeed_input_mode` | GUI branch | enum | `rpm`; default `rpm` | Compatibility key retained for saved configs; the Web UI uses RPM input only. |
@@ -83,7 +83,7 @@ typed endpoints above.
 | `collective_pitch_deg` | `OperatingPoint.collective_pitch_deg` | deg | `-5 to 25`; default `8` | Used in fixed-collective mode and equal-collective coaxial studies. |
 | `max_collective_deg` | `HoverSolverSettings.max_collective_deg` | deg | `0-35`; default `15` | Upper collective search bound for target-thrust trim. |
 | `min_collective_deg` | `HoverSolverSettings.min_collective_deg` | deg | `-10 to 10`; default `0` | Lower collective search bound for target-thrust trim. |
-| `new_polars` | `XfoilPolarProvider.new_polar` | bool | default `true` | Generate missing XFOIL polar bins. Existing matching cache files are reused unless XFOIL polar-generation settings change. |
+| `new_polars` | `XfoilPolarProvider.new_polar` | bool | default `true` | Run XFOIL for missing polar bins. When false, cached polars are used only and XFOIL is never launched, even if other settings request unavailable alpha/Re/Mach data. |
 | `polar_alpha_min_deg` | `XfoilPolarProvider.alpha_min_deg` | deg | `-20 to 5`; default `-3` | Lower AoA bound for generated XFOIL polar tables. |
 | `polar_alpha_max_deg` | `XfoilPolarProvider.alpha_max_deg` | deg | `10-18`; default `18` | Upper AoA bound for generated XFOIL polar tables. Requests above 18 deg are capped because XFOIL often fails there and this is an estimator. |
 | `xfoil_parallel_workers` | `XfoilPolarProvider.parallel_workers` | count | `2-16`; default `8` | Maximum MPI workers used to generate independent missing XFOIL polar bins. Use `8` for the current hover workflow unless explicitly debugging. |
@@ -119,16 +119,17 @@ These fields define `BladeStation(...)` rows. The table must be sorted by
 | `station_r_over_R` | `BladeStation.r_over_R` | r/R | `0.02-1.0`; monotonic | Radial station location. |
 | `station_chord_m` | `BladeStation.chord_m` | m | `0.001-2.5`; default current chord | Local blade chord. |
 | `station_twist_deg` | `BladeStation.twist_deg` | deg | `-30 to 30`; default linear washout | Local built-in twist relative to collective. |
-| `station_airfoil` | `BladeStation.airfoil` | text | default global airfoil | Optional local airfoil for blended blades. |
-| `station_pitch_axis_frac` | `BladeStation.pitch_axis_frac` | chord fraction | `0-1`; default `0.25` | Pitch axis for aerodynamic pitch moment about control linkage. |
+| `station_airfoil` | `BladeStation.airfoil` | text | blank means global airfoil | Optional local airfoil for blended blades. |
+| `station_pitch_axis_frac` | `BladeStation.pitch_axis_frac` | chord fraction | `0-1`; default `0.25` | Moment reference axis as a chord fraction; this is not blade pitch or twist. |
 
 ## Coaxial Inputs
 
 | GUI key | Endpoint | Units | Range / default | Description |
 |---|---|---:|---|---|
 | `coaxial_spacing_ratio` | `CoaxialSpec.spacing_ratio` | z/R | `0.05-1.5`; default `0.25` | Vertical spacing between rotor disks divided by upper rotor radius. |
-| `coaxial_trim_mode` | `CoaxialSpec.trim_mode` | enum | `equal_thrust`, `equal_collective`; default `equal_thrust` | Equal thrust trims both rotors to half target thrust; equal collective evaluates fixed pitch. |
+| `coaxial_trim_mode` | `CoaxialSpec.trim_mode` | enum | `torque_balance`, `equal_thrust`, `equal_collective`; default `torque_balance` | `torque_balance` solves total aircraft thrust and zero net aircraft yaw torque. Equal thrust and equal collective are retained as comparison/debug modes. |
 | `lower_collective_offset_deg` | `CoaxialSpec.lower_collective_offset_deg` | deg | `-10 to 10`; default `0` | Lower rotor collective offset for equal-collective studies. |
+| `lower_rotor_speed_ratio` | lower `RotorSpec.headspeed_rpm / upper RotorSpec.headspeed_rpm` | ratio | `0.25-3.0`; default `1.0` | Lower rotor gear ratio relative to the upper/reference RPM. A value of `1.05` means the lower rotor runs 5% faster; all coaxial trim objectives are solved with this lower rotor RPM. |
 | `lower_rotor_scale` | GUI convenience before `RotorSpec` creation | factor | `0.5-1.5`; default `1.0` | Optional lower rotor diameter/chord scale if not entering a separate lower station table. |
 
 ## Hover Outputs
@@ -142,6 +143,7 @@ All single-rotor hover outputs are on `HoverResult`.
 | `per_blade_thrust_N` | `HoverResult.per_blade_thrust_N` | N/blade | Total thrust carried by one blade. |
 | `total_torque_Nm` | `HoverResult.total_torque_Nm` | N*m | Shaft torque consistent with corrected shaft power. |
 | `per_blade_torque_Nm` | `HoverResult.per_blade_torque_Nm` | N*m/blade | Shaft torque contribution per blade. |
+| `aircraft_yaw_torque_Nm` | `HoverResult.aircraft_yaw_torque_Nm` | N*m | Signed aircraft reaction yaw torque. Positive is counterclockwise/left yaw viewed from above; negative is clockwise/right yaw. |
 | `power_W` | `HoverResult.power_W` | W | Shaft power from induced plus profile components. |
 | `induced_power_W` | `HoverResult.induced_power_W` | W | Induced component after `induced_power_factor`. |
 | `profile_power_W` | `HoverResult.profile_power_W` | W | Profile drag power from section Cd integration. |
@@ -154,7 +156,7 @@ All single-rotor hover outputs are on `HoverResult`.
 | `mean_loss_factor` | `HoverResult.mean_loss_factor` | ratio | Thrust-weighted Prandtl loss factor. |
 | `root_flap_bending_moment_Nm_per_blade` | `HoverResult.root_flap_bending_moment_Nm_per_blade` | N*m/blade | Root bending estimate from radial thrust loads. |
 | `root_lag_moment_Nm_per_blade` | `HoverResult.root_lag_moment_Nm_per_blade` | N*m/blade | In-plane/lag moment estimate from tangential loads. |
-| `aerodynamic_pitching_moment_Nm_per_blade` | `HoverResult.aerodynamic_pitching_moment_Nm_per_blade` | N*m/blade | Section Cm plus pitch-axis offset integrated along one blade. |
+| `aerodynamic_pitching_moment_Nm_per_blade` | `HoverResult.aerodynamic_pitching_moment_Nm_per_blade` | N*m/blade | Section Cm plus pitch-axis offset integrated along one blade. Use this as aerodynamic hinge-moment input for pitch-link/servo sizing, then add linkage ratio, friction, inertia, transients, and safety factor. |
 
 ## Blade Load Table Outputs
 
@@ -188,6 +190,7 @@ All coaxial outputs are on `CoaxialHoverResult`.
 | `isolated_lower` | `CoaxialHoverResult.isolated_lower` | `HoverResult` | Lower rotor reference without upper wake. |
 | `total_thrust_N` | `CoaxialHoverResult.total_thrust_N` | N | Upper plus lower thrust. |
 | `total_power_W` | `CoaxialHoverResult.total_power_W` | W | Upper plus lower shaft power. |
+| `net_aircraft_yaw_torque_Nm` | `CoaxialHoverResult.net_aircraft_yaw_torque_Nm` | N*m | Sum of upper and lower signed aircraft yaw reaction torques. Positive is counterclockwise/left yaw viewed from above; negative is clockwise/right yaw. |
 | `interference_power_delta_W` | `CoaxialHoverResult.interference_power_delta_W` | W | Coaxial power minus isolated pair power. |
 | `interference_loss_ratio` | `CoaxialHoverResult.interference_loss_ratio` | ratio | Interference delta divided by isolated pair power. |
 | `lower_external_velocity_mean_m_s` | `CoaxialHoverResult.lower_external_velocity_mean_m_s` | m/s | Mean upper-wake velocity applied to lower elements. |
@@ -217,6 +220,18 @@ All coaxial outputs are on `CoaxialHoverResult`.
   custom path, and never track them in Git.
 - The root-level `webui.py` launcher starts the local Panel Web UI. Closing the
   owning terminal window or pressing Ctrl+C stops the server.
+- Summary and Blade Element Loads tables are display outputs. They should allow
+  row/text selection and clipboard copying, but not cell editing.
+- Blade Element Loads can exceed the visible width because it exposes every
+  per-element flow and load term. The table container must horizontally scroll
+  rather than clipping columns.
+- Top-toolbar export controls stay visible for plot PNG, summary CSV, and blade
+  loads CSV. If the requested artifact has not been generated yet, the GUI logs
+  a warning in the output field.
+- `Interference Loss vs Spacing` is a coaxial-only plot. It reuses the current
+  rotor, airfoil, XFOIL/cache, solver, propulsion-independent hover, and coaxial
+  trim settings while sweeping `coaxial_spacing_ratio` linearly from `z/R=0.05`
+  to `z/R=1.50`.
 
 ## XFOIL Cache And Parallelism
 
@@ -230,6 +245,10 @@ All coaxial outputs are on `CoaxialHoverResult`.
 - No new hover result fields were added by this change. The existing
   `alpha_clamped`, `reynolds`, `mach`, `cl`, `cd`, and `cm` outputs continue to
   expose the section data produced from generated polars.
+- `new_polars=false` is a strict cache-only mode. A missing cache bin raises an
+  error instead of launching XFOIL. If a solved blade element asks for alpha
+  outside the loaded polar range, the solver clamps coefficients to the table
+  edge and the Web UI logs a warning.
 
 ## Theory Notes
 
@@ -241,6 +260,31 @@ All coaxial outputs are on `CoaxialHoverResult`.
   NDARC theory notes that in hover the lower rotor acts in the contracted wake
   of the upper rotor, and uses separate upper/lower induced-power treatment:
   https://rotorcraft.arc.nasa.gov/Publications/files/NDARCTheory_v1_6_938.pdf
+- The current coaxial implementation is axial-wake only. Counter-rotation,
+  torque cancellation, and swirl recovery are not modeled as a lower-rotor
+  incidence benefit. NASA TP-3675 notes that upper-wake contraction lets some
+  outboard lower-rotor area see cleaner air, but also that lower-rotor axial
+  convection differs from an isolated rotor and that swirl recovery is secondary
+  for most operational coaxial helicopters:
+  https://ntrs.nasa.gov/api/citations/19970015550/downloads/19970015550.pdf
+- Equal-thrust coaxial trim can therefore show a noticeably higher lower
+  collective when the lower disk is inside the upper axial wake. Treat the split
+  as a conservative first-order estimate until calibrated against a measured
+  coaxial rotor or upgraded to a free-wake/swirl model.
+- The production coaxial hover trim mode is `torque_balance`, which solves
+  `T_upper + T_lower = W` and `net_aircraft_yaw_torque_Nm = 0`. This permits
+  unequal thrust sharing when the lower rotor is torque-heavy in the upper wake.
+  Equal-thrust trim is intentionally kept as a comparison mode because it can
+  produce yaw imbalance.
+- `lower_rotor_speed_ratio` changes the lower rotor RPM before trim is solved.
+  Torque-balanced hover still solves the same lift and yaw equations; changing
+  the gear ratio changes the collectives and thrust split required to satisfy
+  those equations.
+- Rotor `rotation_direction=+1` means counterclockwise rotor rotation viewed
+  from above; `-1` means clockwise. Shaft torque is reported as a positive
+  magnitude, while aircraft yaw reaction torque is
+  `-rotation_direction * shaft_torque`. Therefore positive yaw torque means the
+  aircraft tends counterclockwise/left, and negative yaw torque means clockwise/right.
 - The coaxial model is still an estimator, not a free-wake or CFD model. It is
   scientifically stronger than the old total-blade-count shortcut, but should be
   calibrated against measured rotor data before design-critical use.

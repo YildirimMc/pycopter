@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import io
 import json
-from html import escape
 from datetime import datetime
 from typing import Any
 
@@ -16,13 +15,21 @@ import numpy as np
 import pandas as pd
 import panel as pn
 
-from pycopter import CoaxialHoverResult, HoverResult
+from pycopter import (
+    CoaxialHoverResult,
+    CoaxialSpec,
+    HoverResult,
+    HoverSolver,
+    OperatingPoint,
+    solve_coaxial_hover,
+)
 
 from .calculations import (
     DEFAULT_CONFIG,
     DEFAULT_STATION_ROWS,
     CONFIG_VERSION,
     HoverCase,
+    build_solver_settings,
     build_rotor_spec,
     build_xfoil_provider,
     electric_summary,
@@ -44,6 +51,17 @@ from .calculations import (
 PLOT_FIGSIZE = (7.0, 8.0)
 RESULT_PANE_HEIGHT = 780
 RESULT_TABS_HEIGHT = 820
+RESULT_TABLE_CONFIGURATION = {
+    "clipboard": True,
+    "clipboardCopyRowRange": "selected",
+    "columnDefaults": {"editable": False},
+}
+COAXIAL_SPACING_SWEEP_POINTS = 25
+COAXIAL_SPACING_SWEEP_MIN = 0.05
+COAXIAL_SPACING_SWEEP_MAX = 1.50
+DESIGN_SWEEP_POINTS = 17
+CONTROL_SWEEP_POINTS = 31
+MIN_SWEEP_GROSS_MASS_KG = 0.05
 THEME = {
     "page": "#111315",
     "panel": "#1b1d20",
@@ -87,19 +105,24 @@ body {
 }
 .pycopter-log {
     height: 150px;
-    overflow-y: auto;
-    white-space: pre-wrap;
+}
+.pycopter-log .xterm {
+    height: 150px !important;
     font-family: Consolas, "Courier New", monospace;
     font-size: 12px;
-    color: #d9efe9;
     background: #121416;
     border: 1px solid #3a4048;
-    padding: 8px;
-    user-select: text;
+    padding: 4px 6px;
 }
-.pycopter-log-text {
-    margin: 0;
-    white-space: pre-wrap;
+.pycopter-log .xterm-viewport,
+.pycopter-log .xterm-screen {
+    background: #121416 !important;
+}
+.pycopter-log .xterm-viewport {
+    overflow-y: auto !important;
+}
+.pycopter-log .xterm-rows {
+    user-select: text;
 }
 button.bk-btn,
 .bk-btn {
@@ -127,6 +150,17 @@ button.bk-btn:disabled,
     background: #141619;
     border: 1px solid #3a4048;
 }
+.pycopter-table-scroll {
+    max-width: 690px;
+    overflow-x: auto;
+    overflow-y: hidden;
+}
+.pycopter-result-table .tabulator-tableholder {
+    overflow-x: auto !important;
+}
+.pycopter-load-table .tabulator-table {
+    min-width: max-content;
+}
 .bk-root,
 .bk {
     color: #e7ecf2;
@@ -136,6 +170,18 @@ button.bk-btn:disabled,
 .bk-checkbox-label,
 .bk-radio-group label {
     color: #d7dde5 !important;
+}
+.pycopter-xfoil-checkbox,
+.pycopter-xfoil-checkbox *,
+.pycopter-xfoil-checkbox label,
+.pycopter-xfoil-checkbox .bk,
+.pycopter-xfoil-checkbox .bk-checkbox-label,
+.pycopter-xfoil-checkbox .bk-input-group-label {
+    color: #e7ecf2 !important;
+    opacity: 1 !important;
+}
+.pycopter-xfoil-checkbox input[type="checkbox"] {
+    accent-color: #4db6ac;
 }
 .bk-input,
 input.bk-input,
@@ -254,14 +300,14 @@ class PycopterWebApp:
     """Stateful Panel application."""
 
     def __init__(self) -> None:
-        pn.extension("tabulator", raw_css=[RAW_CSS])
+        pn.extension("tabulator", "terminal", raw_css=[RAW_CSS])
         self.current_case: HoverCase | None = None
         self.initialized_rotor = None
         self._xfoil_provider = None
         self._xfoil_provider_key: tuple[Any, ...] | None = None
         self.output_lines: list[str] = []
-        self._log_render_count = 0
         self.plot_fig = self._blank_figure("Initialize rotor, then calculate hover.")
+        self._plot_save_available = False
 
         self._build_widgets()
         self._wire_events()
@@ -275,12 +321,15 @@ class PycopterWebApp:
             self.load_file,
             self.load_btn,
             self.clear_output_btn,
+            self.save_plot_download,
+            self.save_summary_download,
+            self.save_loads_download,
             sizing_mode="stretch_width",
         )
 
         left = pn.Column(
             self._panel("Rotor Parameters", self._rotor_controls()),
-            width=305,
+            width=430,
         )
         middle = pn.Column(
             self._panel("Calculation Parameters", self._calculation_controls()),
@@ -303,7 +352,7 @@ class PycopterWebApp:
             pn.Row(left, middle, right),
             bottom,
             css_classes=["pycopter-shell"],
-            width=1440,
+            width=1570,
         )
 
     def _build_widgets(self) -> None:
@@ -318,9 +367,31 @@ class PycopterWebApp:
         self.load_file = pn.widgets.FileInput(accept=".json", width=230)
         self.load_btn = pn.widgets.Button(label="Load Config", width=120)
         self.clear_output_btn = pn.widgets.Button(label="Clear Outputs", width=120)
+        self.save_plot_download = pn.widgets.FileDownload(
+            callback=self._save_plot_callback,
+            filename="pycopter_plot.png",
+            label="Save Plot",
+            width=110,
+        )
+        self.save_summary_download = pn.widgets.FileDownload(
+            callback=self._save_summary_callback,
+            filename="pycopter_summary.csv",
+            label="Save Summary",
+            width=125,
+        )
+        self.save_loads_download = pn.widgets.FileDownload(
+            callback=self._save_loads_callback,
+            filename="pycopter_blade_loads.csv",
+            label="Save Loads",
+            width=115,
+        )
 
-        self.airfoil = pn.widgets.TextInput(label="Airfoil", value=cfg["airfoil"], width=270)
-        self.new_polars = pn.widgets.Checkbox(label="Generate Missing XFOIL Polars", value=cfg["new_polars"])
+        self.airfoil = pn.widgets.TextInput(label="Airfoil", value=cfg["airfoil"], width=390)
+        self.new_polars = pn.widgets.Checkbox(
+            label="Run XFOIL For Missing Polars",
+            value=cfg["new_polars"],
+            css_classes=["pycopter-xfoil-checkbox"],
+        )
         self.rotor_system_type = pn.widgets.Select(
             label="Rotor System",
             options={"Single rotor": "single", "Coaxial": "coaxial"},
@@ -339,22 +410,29 @@ class PycopterWebApp:
             value=cfg["headspeed_input_mode"],
             width=115,
         )
-        self.headspeed_rpm = pn.widgets.FloatInput(label="Headspeed [rpm]", value=cfg["headspeed_rpm"], start=100.0, end=100000.0, step=50.0, width=135)
+        self.headspeed_rpm = pn.widgets.FloatInput(label="Upper / Ref RPM [rpm]", value=cfg["headspeed_rpm"], start=100.0, end=100000.0, step=50.0, width=185)
         self.tip_speed_mach = pn.widgets.FloatInput(label="Tip Speed Mach", value=cfg["tip_speed_mach"], start=0.02, end=0.9, step=0.01, width=135)
-        self.init_rotor_btn = pn.widgets.Button(label="Initialize Rotor", width=270)
+        self.init_rotor_btn = pn.widgets.Button(label="Initialize Rotor", width=390)
 
         self.geometry_mode = pn.widgets.Select(
-            label="Geometry Input",
-            options={"Uniform blade": "uniform", "Station table": "station_table"},
+            label="Geometry Source",
+            options={"Uniform root/tip controls": "uniform", "Blade control point table": "station_table"},
             value=cfg["geometry_mode"],
-            width=160,
+            width=390,
         )
         self.station_table = pn.widgets.Tabulator(
             pd.DataFrame(DEFAULT_STATION_ROWS),
             show_index=False,
-            height=190,
+            height=220,
             width=400,
             layout="fit_columns",
+            titles={
+                "r_over_R": "r/R",
+                "chord_m": "Chord [m]",
+                "twist_deg": "Twist [deg]",
+                "airfoil": "Airfoil Override",
+                "pitch_axis_frac": "Moment Axis [c]",
+            },
             editors={
                 "r_over_R": {"type": "number", "min": 0.02, "max": 1.0, "step": 0.01},
                 "chord_m": {"type": "number", "min": 0.001, "max": 2.5, "step": 0.001},
@@ -363,7 +441,7 @@ class PycopterWebApp:
                 "pitch_axis_frac": {"type": "number", "min": 0.0, "max": 1.0, "step": 0.01},
             },
         )
-        self.reset_stations_btn = pn.widgets.Button(label="Reset Geometry Points From Root/Tip Twist", width=300)
+        self.reset_stations_btn = pn.widgets.Button(label="Reset Geometry Points From Root/Tip Twist", width=390)
 
         self.gross = pn.widgets.FloatInput(label="Gross Mass [kg]", value=cfg["gross"], start=0.01, end=100000.0, step=0.1, width=185)
         self.density = pn.widgets.FloatInput(label="Density [kg/m3]", value=cfg["density"], start=0.01, end=2.0, step=0.001, width=185)
@@ -388,15 +466,36 @@ class PycopterWebApp:
         self.xfoil_cache_dir = pn.widgets.TextInput(label="XFOIL Cache Dir", value=cfg["xfoil_cache_directory"], placeholder="optional ignored path", width=390)
         self.calc_hover_btn = pn.widgets.Button(label="Calculate Hover", width=390, disabled=True)
 
-        self.coaxial_spacing = pn.widgets.FloatInput(label="Spacing z/R", value=cfg["coaxial_spacing_ratio"], start=0.05, end=1.5, step=0.05, width=185)
+        self.coaxial_spacing = pn.widgets.FloatInput(label="Rotor Spacing z/R", value=cfg["coaxial_spacing_ratio"], start=0.05, end=1.5, step=0.05, width=185)
         self.coaxial_trim_mode = pn.widgets.Select(
-            label="Coaxial Trim",
-            options={"Equal thrust": "equal_thrust", "Equal collective": "equal_collective"},
+            label="Coaxial Trim Objective",
+            options={
+                "Torque-balanced hover": "torque_balance",
+                "Equal rotor thrust": "equal_thrust",
+                "Equal collective pitch": "equal_collective",
+            },
             value=cfg["coaxial_trim_mode"],
+            width=390,
+        )
+        self.lower_rotor_speed_ratio = pn.widgets.FloatInput(
+            label="Lower/Upper RPM Ratio",
+            value=cfg["lower_rotor_speed_ratio"],
+            start=0.25,
+            end=3.0,
+            step=0.01,
             width=185,
         )
-        self.lower_collective_offset = pn.widgets.FloatInput(label="Lower Offset [deg]", value=cfg["lower_collective_offset_deg"], start=-10.0, end=10.0, step=0.25, width=185)
-        self.lower_rotor_scale = pn.widgets.FloatInput(label="Lower Scale", value=cfg["lower_rotor_scale"], start=0.5, end=1.5, step=0.01, width=185)
+        self.lower_headspeed_rpm = pn.widgets.FloatInput(
+            label="Lower RPM [rpm]",
+            value=float(cfg["headspeed_rpm"]) * float(cfg["lower_rotor_speed_ratio"]),
+            start=0.0,
+            end=300000.0,
+            step=1.0,
+            width=185,
+            disabled=True,
+        )
+        self.lower_collective_offset = pn.widgets.FloatInput(label="Lower Collective Bias [deg]", value=cfg["lower_collective_offset_deg"], start=-10.0, end=10.0, step=0.25, width=185)
+        self.lower_rotor_scale = pn.widgets.FloatInput(label="Lower Geometry Scale", value=cfg["lower_rotor_scale"], start=0.5, end=1.5, step=0.01, width=185)
 
         self.battery_capacity = pn.widgets.FloatInput(label="Battery [Wh]", value=cfg["battery_capacity_Wh"], start=0.1, end=100000.0, step=10.0, width=185)
         self.battery_usable = pn.widgets.FloatInput(label="Usable Fraction", value=cfg["battery_usable_fraction"], start=0.05, end=1.0, step=0.01, width=185)
@@ -421,9 +520,53 @@ class PycopterWebApp:
         self.plot_select = pn.widgets.Select(label="Selected Plot", options=[], width=400)
         self.generate_plot_btn = pn.widgets.Button(label="Generate Plot", width=400, disabled=True)
 
-        self.output_log = pn.pane.HTML("", height=150, sizing_mode="stretch_width", css_classes=["pycopter-log"])
-        self.summary_table = pn.widgets.Tabulator(pd.DataFrame(columns=["Metric", "Value"]), show_index=False, height=RESULT_PANE_HEIGHT, layout="fit_data_stretch")
-        self.load_table = pn.widgets.Tabulator(pd.DataFrame(), show_index=False, height=RESULT_PANE_HEIGHT, layout="fit_data_stretch")
+        self.output_log = pn.widgets.Terminal(
+            output="",
+            height=150,
+            sizing_mode="stretch_width",
+            options={
+                "convertEol": True,
+                "cursorBlink": False,
+                "disableStdin": True,
+                "fontFamily": 'Consolas, "Courier New", monospace',
+                "fontSize": 12,
+                "scrollback": 1000,
+                "theme": {
+                    "background": "#121416",
+                    "foreground": "#d9efe9",
+                    "cursor": "#4db6ac",
+                    "selectionBackground": "#264f78",
+                },
+            },
+            css_classes=["pycopter-log"],
+        )
+        self.summary_table = pn.widgets.Tabulator(
+            pd.DataFrame(columns=["Metric", "Value"]),
+            show_index=False,
+            height=RESULT_PANE_HEIGHT,
+            width=690,
+            layout="fit_data_stretch",
+            selectable=True,
+            editors={"Metric": None, "Value": None},
+            configuration=RESULT_TABLE_CONFIGURATION,
+            css_classes=["pycopter-result-table"],
+        )
+        self.load_table = pn.widgets.Tabulator(
+            pd.DataFrame(),
+            show_index=False,
+            height=RESULT_PANE_HEIGHT,
+            width=690,
+            layout="fit_data_table",
+            selectable=True,
+            configuration=RESULT_TABLE_CONFIGURATION,
+            css_classes=["pycopter-result-table", "pycopter-load-table"],
+        )
+        self.load_table_container = pn.Column(
+            self.load_table,
+            width=690,
+            height=RESULT_PANE_HEIGHT,
+            css_classes=["pycopter-table-scroll"],
+        )
         self.plot_pane = pn.pane.Matplotlib(
             self.plot_fig,
             height=RESULT_PANE_HEIGHT,
@@ -434,7 +577,7 @@ class PycopterWebApp:
         self.result_tabs = pn.Tabs(
             ("Plot", self.plot_pane),
             ("Summary", self.summary_table),
-            ("Blade Element Loads", self.load_table),
+            ("Blade Element Loads", self.load_table_container),
             dynamic=False,
             height=RESULT_TABS_HEIGHT,
             width=700,
@@ -452,6 +595,8 @@ class PycopterWebApp:
         self.propulsion_tabs.param.watch(lambda _: self._on_propulsion_changed(), "active")
         self.rotor_system_type.param.watch(lambda _: self._sync_enabled_state(), "value")
         self.headspeed_input_mode.param.watch(lambda _: self._sync_enabled_state(), "value")
+        self.headspeed_rpm.param.watch(lambda _: self._update_lower_rpm_display(), "value")
+        self.lower_rotor_speed_ratio.param.watch(lambda _: self._update_lower_rpm_display(), "value")
         self.geometry_mode.param.watch(lambda _: self._sync_enabled_state(), "value")
 
     def _panel(self, title: str, content) -> pn.Column:
@@ -473,15 +618,19 @@ class PycopterWebApp:
             self._two_col(self.root_twist, self.tip_twist),
             self._two_col(self.root_cutout, self.headspeed_rpm),
             pn.layout.Divider(),
+            self._geometry_controls(),
+            pn.layout.Divider(),
             self.init_rotor_btn,
-            width=285,
+            width=410,
         )
 
     def _coaxial_controls(self) -> pn.Column:
         return pn.Column(
-            self._two_col(self.coaxial_spacing, self.coaxial_trim_mode),
-            self._two_col(self.lower_collective_offset, self.lower_rotor_scale),
-            width=300,
+            self.coaxial_trim_mode,
+            self._two_col(self.coaxial_spacing, self.lower_rotor_speed_ratio),
+            self._two_col(self.lower_headspeed_rpm, self.lower_collective_offset),
+            self._two_col(self.lower_rotor_scale),
+            width=410,
         )
 
     def _hover_controls(self) -> pn.Column:
@@ -516,7 +665,6 @@ class PycopterWebApp:
             pn.Accordion(
                 ("Background Solver Settings", self._solver_controls()),
                 ("XFOIL Polar Generation", self._xfoil_controls()),
-                ("Blade Geometry Control Points", self._geometry_controls()),
                 ("Coaxial Settings", self._coaxial_controls()),
                 active=[],
                 width=410,
@@ -594,6 +742,7 @@ class PycopterWebApp:
                 "coaxial_spacing_ratio": self.coaxial_spacing.value,
                 "coaxial_trim_mode": self.coaxial_trim_mode.value,
                 "lower_collective_offset_deg": self.lower_collective_offset.value,
+                "lower_rotor_speed_ratio": self.lower_rotor_speed_ratio.value,
                 "lower_rotor_scale": self.lower_rotor_scale.value,
             }
         )
@@ -646,6 +795,8 @@ class PycopterWebApp:
         self.coaxial_spacing.value = float(cfg["coaxial_spacing_ratio"])
         self.coaxial_trim_mode.value = cfg["coaxial_trim_mode"]
         self.lower_collective_offset.value = float(cfg["lower_collective_offset_deg"])
+        self.lower_rotor_speed_ratio.value = float(cfg["lower_rotor_speed_ratio"])
+        self._update_lower_rpm_display()
         self.lower_rotor_scale.value = float(cfg["lower_rotor_scale"])
         self.station_table.value = pd.DataFrame(station_rows or station_rows_from_uniform(cfg))
         self.current_case = None
@@ -663,6 +814,47 @@ class PycopterWebApp:
             "station_rows": self._station_rows(),
         }
         data = io.BytesIO(json.dumps(payload, indent=4).encode("utf-8"))
+        data.seek(0)
+        return data
+
+    def _save_plot_callback(self) -> io.BytesIO:
+        if not self._plot_save_available:
+            self._log("WARNING - No plot has been generated yet. Generate a plot before saving it.")
+            return self._empty_export()
+
+        data = io.BytesIO()
+        self.plot_fig.savefig(
+            data,
+            format="png",
+            dpi=180,
+            bbox_inches="tight",
+            facecolor=self.plot_fig.get_facecolor(),
+            edgecolor="none",
+        )
+        data.seek(0)
+        return data
+
+    def _save_summary_callback(self) -> io.BytesIO:
+        frame = self.summary_table.value
+        if self.current_case is None or frame.empty:
+            self._log("WARNING - No summary table has been generated yet. Calculate hover before saving it.")
+            return self._empty_export()
+        return self._dataframe_csv(frame)
+
+    def _save_loads_callback(self) -> io.BytesIO:
+        frame = self.load_table.value
+        if self.current_case is None or frame.empty:
+            self._log("WARNING - No blade element loads table has been generated yet. Calculate hover before saving it.")
+            return self._empty_export()
+        return self._dataframe_csv(frame)
+
+    def _dataframe_csv(self, frame: pd.DataFrame) -> io.BytesIO:
+        data = io.BytesIO(frame.to_csv(index=False).encode("utf-8"))
+        data.seek(0)
+        return data
+
+    def _empty_export(self) -> io.BytesIO:
+        data = io.BytesIO(b"")
         data.seek(0)
         return data
 
@@ -687,15 +879,16 @@ class PycopterWebApp:
 
     def _clear_output(self) -> None:
         self.output_lines = []
-        self.output_log.object = ""
+        self.output_log.clear()
 
     def _clear_results(self) -> None:
         self.current_case = None
         self.initialized_rotor = None
         self.plot_fig = self._blank_figure("Initialize rotor, then calculate hover.")
+        self._plot_save_available = False
         self.plot_pane.object = self.plot_fig
-        self.summary_table.value = pd.DataFrame(columns=["Metric", "Value"])
-        self.load_table.value = pd.DataFrame()
+        self._set_read_only_table_value(self.summary_table, pd.DataFrame(columns=["Metric", "Value"]))
+        self._set_read_only_table_value(self.load_table, pd.DataFrame())
         self._sync_enabled_state()
         self._update_plot_options()
 
@@ -707,15 +900,43 @@ class PycopterWebApp:
             self.current_case = None
             self._log("Initializing rotor...")
             self._log(
-                "Tip Speed: "
+                "Upper Tip Speed: "
                 f"{self.initialized_rotor.tip_speed_m_s:.3f} [m/s] | "
-                f"Tip Mach: {self.initialized_rotor.tip_speed_mach:.3f} | "
+                f"Upper Tip Mach: {self.initialized_rotor.tip_speed_mach:.3f} | "
                 f"Rotor Disk Area: {self.initialized_rotor.disk_area_m2:.4f} [m2] | "
                 f"Solidity: {self.initialized_rotor.solidity:.4f}"
             )
             total_blades = self.initialized_rotor.num_blades * (2 if config["rotor_system_type"] == "coaxial" else 1)
             self._log(f"Blades per rotor: {self.initialized_rotor.num_blades} | Total blades: {total_blades}")
-            self._log(f"Geometry control points: {len(rows)} | Solver blade elements per rotor: {config['blade_element_count']}")
+            if config["rotor_system_type"] == "coaxial":
+                lower_rotor = build_rotor_spec(
+                    config,
+                    rows,
+                    name="lower",
+                    scale=float(config["lower_rotor_scale"]),
+                    headspeed_ratio=float(config["lower_rotor_speed_ratio"]),
+                    rotation_direction=-1,
+                )
+                self._log(
+                    f"Upper RPM: {self.initialized_rotor.headspeed_rpm:.1f} [rpm] | "
+                    f"Lower RPM: {lower_rotor.headspeed_rpm:.1f} [rpm] | "
+                    f"Lower/Upper RPM Ratio: {float(config['lower_rotor_speed_ratio']):.3f} | "
+                    f"Lower Tip Mach: {lower_rotor.tip_speed_mach:.3f}"
+                )
+            geometry_source = (
+                "uniform root/tip controls"
+                if config["geometry_mode"] == "uniform"
+                else "blade control point table"
+            )
+            active_airfoils = sorted(
+                {self.initialized_rotor.airfoil_at(station.r_over_R) for station in self.initialized_rotor.stations}
+            )
+            self._log(
+                f"Geometry source: {geometry_source} | "
+                f"Control points: {len(self.initialized_rotor.stations)} | "
+                f"Solver blade elements per rotor: {config['blade_element_count']} | "
+                f"Active airfoils: {', '.join(active_airfoils)}"
+            )
         except Exception as err:
             self.initialized_rotor = None
             self.current_case = None
@@ -793,15 +1014,32 @@ class PycopterWebApp:
     def _log_hover_result(self, case: HoverCase, config: dict[str, Any]) -> None:
         result = case.result
         if isinstance(result, CoaxialHoverResult):
+            upper_rpm = float(config["headspeed_rpm"])
+            lower_rpm = upper_rpm * float(config["lower_rotor_speed_ratio"])
             self._log(
                 f"Total Thrust: {result.total_thrust_N:.3f} [N] | "
                 f"Total Shaft Power: {result.total_power_W / 1000.0:.3f} [kW] | "
                 f"Interference Loss: {result.interference_loss_ratio:.3f}"
             )
             self._log(
+                f"Upper RPM: {upper_rpm:.1f} [rpm] | "
+                f"Lower RPM: {lower_rpm:.1f} [rpm] | "
+                f"Lower/Upper RPM Ratio: {float(config['lower_rotor_speed_ratio']):.3f}"
+            )
+            self._log(
                 f"Upper Required Collective: {result.upper.collective_pitch_deg:.3f} [deg] | "
                 f"Lower Required Collective: {result.lower.collective_pitch_deg:.3f} [deg] | "
                 f"Wake Velocity: {result.wake_velocity_m_s:.3f} [m/s]"
+            )
+            self._log(
+                f"Upper Thrust: {result.upper.total_thrust_N:.3f} [N] | "
+                f"Lower Thrust: {result.lower.total_thrust_N:.3f} [N] | "
+                f"Upper/Lower Torque: {result.upper.total_torque_Nm:.4f}/{result.lower.total_torque_Nm:.4f} [Nm]"
+            )
+            self._log(
+                "Aircraft Yaw Torque: "
+                f"{result.net_aircraft_yaw_torque_Nm:+.4f} [Nm] "
+                f"({self._yaw_direction(result.net_aircraft_yaw_torque_Nm)})"
             )
         else:
             self._log(
@@ -818,6 +1056,12 @@ class PycopterWebApp:
                 f"Ct: {result.ct:.5f} | Cp: {result.cp:.5f} | "
                 f"Figure of Merit: {result.figure_of_merit:.3f} | Mean Loss: {result.mean_loss_factor:.3f}"
             )
+            self._log(
+                "Aircraft Yaw Torque: "
+                f"{result.aircraft_yaw_torque_Nm:+.4f} [Nm] "
+                f"({self._yaw_direction(result.aircraft_yaw_torque_Nm)})"
+            )
+        self._log_alpha_clamp_warning(case, config)
         prop = propulsion_summary(case, config)
         if config["propulsion_model"] == "electric":
             self._log(
@@ -832,6 +1076,23 @@ class PycopterWebApp:
                 f"Hover Endurance: {prop['hover_endurance_hr']:.3f} [hr]"
             )
 
+    def _log_alpha_clamp_warning(self, case: HoverCase, config: dict[str, Any]) -> None:
+        clamped = []
+        for label, hover in self._iter_hover_results(case):
+            clamped.extend((label, load.alpha_deg) for load in hover.element_loads if load.alpha_clamped)
+        if not clamped:
+            return
+
+        labels = sorted({label for label, _ in clamped})
+        alphas = [alpha for _, alpha in clamped]
+        self._log(
+            "WARNING - "
+            f"{len(clamped)} blade elements requested alpha outside the loaded polar range "
+            f"[{float(config['polar_alpha_min_deg']):.1f}, {float(config['polar_alpha_max_deg']):.1f}] deg; "
+            f"requested range was [{min(alphas):.1f}, {max(alphas):.1f}] deg on {', '.join(labels)}. "
+            "Coefficients were clamped. Expand XFOIL Alpha Min/Max and enable Run XFOIL For Missing Polars if you want new data."
+        )
+
     def _update_summary_table(self, case: HoverCase, config: dict[str, Any]) -> None:
         rows: list[dict[str, str]] = [
             {"Metric": "Rotor System", "Value": "Coaxial" if case.system_type == "coaxial" else "Single rotor"},
@@ -841,10 +1102,21 @@ class PycopterWebApp:
 
         result = case.result
         if isinstance(result, CoaxialHoverResult):
+            upper_rpm = float(config["headspeed_rpm"])
+            lower_rpm = upper_rpm * float(config["lower_rotor_speed_ratio"])
             rows.extend(
                 [
+                    {"Metric": "Upper Headspeed [rpm]", "Value": f"{upper_rpm:.1f}"},
+                    {"Metric": "Lower Headspeed [rpm]", "Value": f"{lower_rpm:.1f}"},
+                    {"Metric": "Lower/Upper RPM Ratio", "Value": f"{float(config['lower_rotor_speed_ratio']):.3f}"},
                     {"Metric": "Upper Power [kW]", "Value": f"{result.upper.power_W / 1000.0:.3f}"},
                     {"Metric": "Lower Power [kW]", "Value": f"{result.lower.power_W / 1000.0:.3f}"},
+                    {"Metric": "Upper Thrust [N]", "Value": f"{result.upper.total_thrust_N:.3f}"},
+                    {"Metric": "Lower Thrust [N]", "Value": f"{result.lower.total_thrust_N:.3f}"},
+                    {"Metric": "Upper Thrust Share", "Value": f"{result.upper.total_thrust_N / max(result.total_thrust_N, 1e-9):.4f}"},
+                    {"Metric": "Lower Thrust Share", "Value": f"{result.lower.total_thrust_N / max(result.total_thrust_N, 1e-9):.4f}"},
+                    {"Metric": "Net Aircraft Yaw Torque [Nm]", "Value": f"{result.net_aircraft_yaw_torque_Nm:+.4f}"},
+                    {"Metric": "Net Aircraft Yaw Direction", "Value": self._yaw_direction(result.net_aircraft_yaw_torque_Nm)},
                     {"Metric": "Interference Delta [W]", "Value": f"{result.interference_power_delta_W:.3f}"},
                     {"Metric": "Interference Loss", "Value": f"{result.interference_loss_ratio:.4f}"},
                     {"Metric": "Wake Radius [m]", "Value": f"{result.wake_radius_m:.4f}"},
@@ -860,6 +1132,7 @@ class PycopterWebApp:
                 [
                     {"Metric": f"{label} Required Collective [deg]", "Value": f"{hover.collective_pitch_deg:.3f}"},
                     {"Metric": f"{label} Torque [Nm]", "Value": f"{hover.total_torque_Nm:.4f}"},
+                    {"Metric": f"{label} Aircraft Yaw Torque [Nm]", "Value": f"{hover.aircraft_yaw_torque_Nm:+.4f}"},
                     {"Metric": f"{label} Figure of Merit", "Value": f"{hover.figure_of_merit:.4f}"},
                     {"Metric": f"{label} Ct", "Value": f"{hover.ct:.6f}"},
                     {"Metric": f"{label} Cp", "Value": f"{hover.cp:.6f}"},
@@ -891,7 +1164,14 @@ class PycopterWebApp:
                     {"Metric": "Hover Endurance [hr]", "Value": f"{prop['hover_endurance_hr']:.3f}"},
                 ]
             )
-        self.summary_table.value = pd.DataFrame(rows)
+        self._set_read_only_table_value(self.summary_table, pd.DataFrame(rows))
+
+    def _yaw_direction(self, yaw_torque_Nm: float) -> str:
+        if abs(yaw_torque_Nm) < 1e-9:
+            return "balanced"
+        if yaw_torque_Nm > 0.0:
+            return "CCW / left yaw (+)"
+        return "CW / right yaw (-)"
 
     def _update_load_table(self, case: HoverCase) -> None:
         result = case.result
@@ -900,9 +1180,14 @@ class PycopterWebApp:
             upper.insert(0, "rotor", "upper")
             lower = pd.DataFrame(load_rows_for_result(result.lower))
             lower.insert(0, "rotor", "lower")
-            self.load_table.value = pd.concat([upper, lower], ignore_index=True)
+            frame = pd.concat([upper, lower], ignore_index=True)
         else:
-            self.load_table.value = pd.DataFrame(load_rows_for_result(result))
+            frame = pd.DataFrame(load_rows_for_result(result))
+        self._set_read_only_table_value(self.load_table, frame)
+
+    def _set_read_only_table_value(self, table: pn.widgets.Tabulator, frame: pd.DataFrame) -> None:
+        table.value = frame
+        table.editors = {column: None for column in frame.columns}
 
     def _generate_plot(self) -> None:
         if not self.plot_select.value:
@@ -928,8 +1213,30 @@ class PycopterWebApp:
                 fig = self._plot_pitch_moment(self.current_case)
             elif plot_name == "Cumulative Thrust and Power":
                 fig = self._plot_cumulative_loads(self.current_case)
+            elif plot_name == "Stall Margin vs Radius":
+                fig = self._plot_stall_margin(self.current_case)
+            elif plot_name == "Geometry Load Contribution":
+                fig = self._plot_geometry_load_contribution(self.current_case)
+            elif plot_name == "Disk Loading Sensitivity":
+                fig = self._plot_disk_loading_sensitivity(self.current_case)
+            elif plot_name == "Rotor Diameter Sizing":
+                fig = self._plot_rotor_diameter_sizing(self.current_case)
+            elif plot_name in ("Reference RPM Sweep", "Headspeed RPM Sweep"):
+                fig = self._plot_headspeed_sweep(self.current_case)
+            elif plot_name == "Collective Authority Curve":
+                fig = self._plot_collective_authority(self.current_case)
+            elif plot_name == "Energy Capacity vs Endurance":
+                fig = self._plot_energy_capacity_endurance(self.current_case)
+            elif plot_name == "Efficiency and Loss Sensitivity":
+                fig = self._plot_efficiency_loss_sensitivity(self.current_case)
+            elif plot_name == "Payload Endurance Sweep":
+                fig = self._plot_payload_endurance_sweep(self.current_case)
             elif plot_name == "Coaxial Interference":
                 fig = self._plot_coaxial_interference(self.current_case)
+            elif plot_name == "Interference Loss vs Spacing":
+                fig = self._plot_interference_loss_vs_spacing(self.current_case)
+            elif plot_name == "Coaxial Thrust Share and Yaw":
+                fig = self._plot_coaxial_thrust_share_yaw(self.current_case)
             elif plot_name == "Electric Range vs Velocity":
                 fig = self._plot_electric_range(self.current_case)
             elif plot_name == "Fuel Range, Endurance vs Velocity":
@@ -940,9 +1247,18 @@ class PycopterWebApp:
                 fig = self._blank_figure("No plot selected.")
             self.plot_fig = fig
             self.plot_pane.object = fig
+            self._plot_save_available = True
+            self.save_plot_download.filename = self._plot_filename(plot_name)
             self.result_tabs.active = 0
+            self._sync_enabled_state()
         except Exception as err:
             self._log(f"ERROR - {err}")
+
+    def _plot_filename(self, plot_name: str) -> str:
+        slug = "".join(char.lower() if char.isalnum() else "_" for char in plot_name).strip("_")
+        while "__" in slug:
+            slug = slug.replace("__", "_")
+        return f"pycopter_{slug or 'plot'}.png"
 
     def _plot_blade_geometry(self):
         frame = self.station_table.value.copy()
@@ -1075,6 +1391,447 @@ class PycopterWebApp:
         fig.legend(loc="upper right")
         return self._finish_plot(fig)
 
+    def _plot_stall_margin(self, case: HoverCase):
+        cfg = self._current_config()
+        alpha_min = float(cfg["polar_alpha_min_deg"])
+        alpha_max = float(cfg["polar_alpha_max_deg"])
+        fig, ax = plt.subplots(figsize=PLOT_FIGSIZE)
+        for label, hover in self._iter_hover_results(case):
+            rows = pd.DataFrame(load_rows_for_result(hover))
+            lower_margin = rows["alpha_deg"] - alpha_min
+            upper_margin = alpha_max - rows["alpha_deg"]
+            nearest_margin = np.minimum(lower_margin, upper_margin)
+            ax.plot(rows["r_over_R"], nearest_margin, marker="o", label=f"{label} nearest alpha limit")
+            ax.fill_between(
+                rows["r_over_R"],
+                0.0,
+                nearest_margin,
+                where=nearest_margin < 0.0,
+                alpha=0.18,
+            )
+        ax.axhline(0.0, color=THEME["warning"], linestyle="--", linewidth=1.0)
+        ax.set_title("Alpha Envelope Margin")
+        ax.set_xlabel("r/R")
+        ax.set_ylabel("Alpha Margin to Polar Limit [deg]")
+        ax.grid(True)
+        ax.legend()
+        return self._finish_plot(fig)
+
+    def _plot_geometry_load_contribution(self, case: HoverCase):
+        station_frame = self.station_table.value.copy()
+        fig, (ax_geom, ax_loads) = plt.subplots(2, 1, figsize=PLOT_FIGSIZE, sharex=False)
+        ax_geom.plot(station_frame["r_over_R"], station_frame["chord_m"], marker="o", label="Chord [m]")
+        ax_geom.set_ylabel("Chord [m]")
+        ax_geom.grid(True)
+        ax_twist = ax_geom.twinx()
+        ax_twist.plot(
+            station_frame["r_over_R"],
+            station_frame["twist_deg"],
+            marker="s",
+            color="tab:red",
+            label="Twist [deg]",
+        )
+        ax_twist.set_ylabel("Twist [deg]")
+        ax_geom.set_title("Control-Point Geometry")
+
+        for label, hover in self._iter_hover_results(case):
+            rows = pd.DataFrame(load_rows_for_result(hover))
+            thrust_sum = max(abs(float(rows["dT_N"].sum())), 1e-9)
+            power_sum = max(abs(float(rows["dP_W"].sum())), 1e-9)
+            ax_loads.plot(
+                rows["r_over_R"],
+                rows["dT_N"] / thrust_sum * 100.0,
+                label=f"{label} thrust share",
+            )
+            ax_loads.plot(
+                rows["r_over_R"],
+                rows["dP_W"] / power_sum * 100.0,
+                linestyle="--",
+                label=f"{label} power share",
+            )
+        ax_loads.set_title("Element Contribution")
+        ax_loads.set_xlabel("r/R")
+        ax_loads.set_ylabel("Element Contribution [%/blade]")
+        ax_loads.grid(True)
+        ax_loads.legend()
+        fig.suptitle("Geometry vs Load Contribution")
+        fig.legend(loc="upper right")
+        return self._finish_plot(fig)
+
+    def _plot_disk_loading_sensitivity(self, case: HoverCase):
+        base_config = self._current_config()
+        station_rows = self._station_rows()
+        provider = self._xfoil_provider_for_config(base_config)
+        gross = float(base_config["gross"])
+        gross_values = np.linspace(
+            max(MIN_SWEEP_GROSS_MASS_KG, 0.5 * gross),
+            max(MIN_SWEEP_GROSS_MASS_KG, 2.0 * gross),
+            DESIGN_SWEEP_POINTS,
+        )
+        self._log(
+            "Calculating disk loading sensitivity "
+            f"from {gross_values[0]:.2f} to {gross_values[-1]:.2f} [kg] gross mass."
+        )
+        sweep = self._collect_hover_sweep(
+            "Disk loading sensitivity",
+            base_config,
+            station_rows,
+            provider,
+            gross_values,
+            lambda value: {"gross": float(value)},
+        )
+
+        disk_loading = []
+        shaft_power = []
+        input_power = []
+        collectives = []
+        for _, cfg, sweep_case in sweep:
+            disk_loading.append(total_hover_thrust_N(sweep_case) / max(sweep_case.rotor.disk_area_m2, 1e-9))
+            power = self._power_metrics(sweep_case, cfg)
+            shaft_power.append(power["shaft_kW"])
+            input_power.append(power["input_kW"])
+            collectives.append(self._mean_collective_deg(sweep_case))
+
+        current_disk_loading = total_hover_thrust_N(case) / max(case.rotor.disk_area_m2, 1e-9)
+        fig, (ax_power, ax_collective) = plt.subplots(2, 1, figsize=PLOT_FIGSIZE, sharex=True)
+        ax_power.plot(disk_loading, shaft_power, marker="o", label="Shaft Power [kW]")
+        ax_power.plot(disk_loading, input_power, marker="s", linestyle="--", label=self._input_power_label(base_config))
+        ax_power.axvline(current_disk_loading, color=THEME["warning"], linestyle="--", linewidth=1.0, label="Current")
+        ax_power.set_ylabel("Power [kW]")
+        ax_power.set_title("Power vs Disk Loading")
+        ax_power.grid(True)
+        ax_power.legend()
+
+        ax_collective.plot(disk_loading, collectives, marker="o", color="tab:red", label="Mean Collective [deg]")
+        ax_collective.axvline(current_disk_loading, color=THEME["warning"], linestyle="--", linewidth=1.0)
+        ax_collective.set_xlabel("Disk Loading [N/m2]")
+        ax_collective.set_ylabel("Mean Collective [deg]")
+        ax_collective.grid(True)
+        ax_collective.legend()
+        fig.suptitle("Disk Loading Sensitivity")
+        return self._finish_plot(fig)
+
+    def _plot_rotor_diameter_sizing(self, case: HoverCase):
+        base_config = self._current_config()
+        station_rows = self._station_rows()
+        provider = self._xfoil_provider_for_config(base_config)
+        diameter = float(base_config["rotor_diam"])
+        diameters = np.linspace(max(0.05, 0.6 * diameter), max(0.05, 1.6 * diameter), DESIGN_SWEEP_POINTS)
+        self._log(
+            "Calculating rotor diameter sizing sweep "
+            f"from {diameters[0]:.2f} to {diameters[-1]:.2f} [m]."
+        )
+        sweep = self._collect_hover_sweep(
+            "Rotor diameter sizing",
+            base_config,
+            station_rows,
+            provider,
+            diameters,
+            lambda value: {"rotor_diam": float(value)},
+        )
+
+        diameters_valid = []
+        shaft_power = []
+        endurance = []
+        tip_mach = []
+        for value, cfg, sweep_case in sweep:
+            diameters_valid.append(float(value))
+            power = self._power_metrics(sweep_case, cfg)
+            shaft_power.append(power["shaft_kW"])
+            endurance.append(power["endurance"])
+            tip_mach.append(self._max_load_value(sweep_case, "mach"))
+
+        fig, (ax_power, ax_endurance) = plt.subplots(2, 1, figsize=PLOT_FIGSIZE, sharex=True)
+        ax_power.plot(diameters_valid, shaft_power, marker="o", label="Shaft Power [kW]")
+        ax_power.axvline(diameter, color=THEME["warning"], linestyle="--", linewidth=1.0, label="Current Diameter")
+        ax_power.set_ylabel("Shaft Power [kW]")
+        ax_power.set_title("Hover Power vs Rotor Diameter")
+        ax_power.grid(True)
+        ax_power.legend()
+
+        ax_endurance.plot(diameters_valid, endurance, marker="s", color="tab:green", label=self._endurance_label(base_config))
+        ax_mach = ax_endurance.twinx()
+        ax_mach.plot(diameters_valid, tip_mach, linestyle="--", color="tab:red", label="Max Mach")
+        ax_endurance.axvline(diameter, color=THEME["warning"], linestyle="--", linewidth=1.0)
+        ax_endurance.set_xlabel("Rotor Diameter [m]")
+        ax_endurance.set_ylabel(self._endurance_label(base_config))
+        ax_mach.set_ylabel("Max Mach")
+        ax_endurance.grid(True)
+        ax_endurance.legend(loc="upper left")
+        ax_mach.legend(loc="upper right")
+        fig.suptitle("Rotor Diameter Sizing")
+        return self._finish_plot(fig)
+
+    def _plot_headspeed_sweep(self, case: HoverCase):
+        base_config = self._current_config()
+        station_rows = self._station_rows()
+        provider = self._xfoil_provider_for_config(base_config)
+        rpm = float(base_config["headspeed_rpm"])
+        rpms = np.linspace(max(100.0, 0.6 * rpm), max(100.0, 1.4 * rpm), DESIGN_SWEEP_POINTS)
+        self._log(f"Calculating reference RPM sweep from {rpms[0]:.0f} to {rpms[-1]:.0f} [rpm].")
+        sweep = self._collect_hover_sweep(
+            "Headspeed RPM sweep",
+            base_config,
+            station_rows,
+            provider,
+            rpms,
+            lambda value: {"headspeed_rpm": float(value)},
+        )
+
+        rpms_valid = []
+        shaft_power = []
+        max_mach = []
+        mean_re = []
+        collective_by_label: dict[str, list[float]] = {}
+        for value, _, sweep_case in sweep:
+            rpms_valid.append(float(value))
+            shaft_power.append(total_hover_power_W(sweep_case) / 1000.0)
+            max_mach.append(self._max_load_value(sweep_case, "mach"))
+            mean_re.append(self._mean_load_value(sweep_case, "reynolds"))
+            for label, hover in self._iter_hover_results(sweep_case):
+                collective_by_label.setdefault(label, []).append(hover.collective_pitch_deg)
+
+        fig, axes = plt.subplots(2, 2, figsize=PLOT_FIGSIZE, sharex=True)
+        ax_power, ax_collective, ax_mach, ax_re = axes.flatten()
+        ax_power.plot(rpms_valid, shaft_power, marker="o", label="Shaft Power [kW]")
+        ax_power.axvline(rpm, color=THEME["warning"], linestyle="--", linewidth=1.0)
+        ax_power.set_ylabel("Shaft Power [kW]")
+        ax_power.set_title("Power")
+        ax_power.grid(True)
+        ax_power.legend()
+
+        for label, values in collective_by_label.items():
+            ax_collective.plot(rpms_valid, values, marker="o", label=f"{label} Collective [deg]")
+        ax_collective.axvline(rpm, color=THEME["warning"], linestyle="--", linewidth=1.0)
+        ax_collective.set_ylabel("Collective [deg]")
+        ax_collective.set_title("Trim Collective")
+        ax_collective.grid(True)
+        ax_collective.legend()
+
+        ax_mach.plot(rpms_valid, max_mach, marker="o", color="tab:red", label="Max Mach")
+        ax_mach.axvline(rpm, color=THEME["warning"], linestyle="--", linewidth=1.0)
+        ax_mach.set_xlabel("Upper / Reference Headspeed [rpm]")
+        ax_mach.set_ylabel("Max Mach")
+        ax_mach.set_title("Compressibility Check")
+        ax_mach.grid(True)
+        ax_mach.legend()
+
+        ax_re.plot(rpms_valid, mean_re, marker="o", color="tab:green", label="Mean Reynolds")
+        ax_re.axvline(rpm, color=THEME["warning"], linestyle="--", linewidth=1.0)
+        ax_re.set_xlabel("Upper / Reference Headspeed [rpm]")
+        ax_re.set_ylabel("Mean Reynolds")
+        ax_re.set_title("Section Reynolds")
+        ax_re.grid(True)
+        ax_re.legend()
+        fig.suptitle("Reference RPM Sweep")
+        return self._finish_plot(fig)
+
+    def _plot_collective_authority(self, case: HoverCase):
+        base_config = self._current_config()
+        station_rows = self._station_rows()
+        provider = self._xfoil_provider_for_config(base_config)
+        current_collectives = [hover.collective_pitch_deg for _, hover in self._iter_hover_results(case)]
+        lower = min(float(base_config["min_collective_deg"]), min(current_collectives) - 4.0)
+        upper = max(float(base_config["max_collective_deg"]), max(current_collectives) + 4.0)
+        collectives = np.linspace(lower, upper, CONTROL_SWEEP_POINTS)
+        lower_offset = float(base_config["lower_collective_offset_deg"]) if case.system_type == "coaxial" else 0.0
+        self._log(f"Calculating collective authority curve from {lower:.1f} to {upper:.1f} [deg].")
+
+        valid = []
+        failures = 0
+        for collective in collectives:
+            try:
+                fixed_case = self._solve_fixed_collective_case(
+                    base_config,
+                    station_rows,
+                    provider,
+                    float(collective),
+                    float(collective + lower_offset),
+                )
+                valid.append((float(collective), fixed_case))
+            except Exception:
+                failures += 1
+        if failures:
+            self._log(f"WARNING - Collective authority curve skipped {failures} non-converged points.")
+        if len(valid) < 2:
+            raise ValueError("Collective authority curve could not compute enough valid points.")
+
+        x = [item[0] for item in valid]
+        thrust = [total_hover_thrust_N(item[1]) for item in valid]
+        yaw_torque = [self._net_aircraft_yaw_torque(item[1]) for item in valid]
+        shaft_power = [total_hover_power_W(item[1]) / 1000.0 for item in valid]
+
+        fig, (ax_thrust, ax_torque) = plt.subplots(2, 1, figsize=PLOT_FIGSIZE, sharex=True)
+        ax_thrust.plot(x, thrust, marker="o", label="Total Thrust [N]")
+        ax_power = ax_thrust.twinx()
+        ax_power.plot(x, shaft_power, marker="s", linestyle="--", color="tab:green", label="Shaft Power [kW]")
+        ax_thrust.axhline(total_hover_thrust_N(case), color=THEME["warning"], linestyle="--", linewidth=1.0, label="Current Thrust")
+        ax_thrust.set_ylabel("Total Thrust [N]")
+        ax_power.set_ylabel("Shaft Power [kW]")
+        ax_thrust.set_title("Lift Authority")
+        ax_thrust.grid(True)
+        ax_thrust.legend(loc="upper left")
+        ax_power.legend(loc="upper right")
+
+        ax_torque.plot(x, yaw_torque, marker="o", color="tab:red", label="Aircraft Yaw Torque [Nm]")
+        ax_torque.axhline(0.0, color=THEME["warning"], linestyle="--", linewidth=1.0)
+        ax_torque.set_xlabel("Upper Collective [deg]")
+        ax_torque.set_ylabel("Aircraft Yaw Torque [Nm]")
+        ax_torque.set_title("Torque / Yaw Response")
+        ax_torque.grid(True)
+        ax_torque.legend()
+        fig.suptitle("Collective Authority Curve")
+        return self._finish_plot(fig)
+
+    def _plot_energy_capacity_endurance(self, case: HoverCase):
+        cfg = self._current_config()
+        shaft_power_W = total_hover_power_W(case)
+        fig, ax = plt.subplots(figsize=PLOT_FIGSIZE)
+        if cfg["propulsion_model"] == "electric":
+            current_capacity = float(cfg["battery_capacity_Wh"])
+            capacities = np.linspace(max(1.0, 0.25 * current_capacity), max(1.0, 2.0 * current_capacity), DESIGN_SWEEP_POINTS)
+            endurance = [
+                electric_summary(shaft_power_W, {**cfg, "battery_capacity_Wh": float(capacity)})["hover_endurance_min"]
+                for capacity in capacities
+            ]
+            ax.plot(capacities, endurance, marker="o", label="Hover Endurance [min]")
+            ax.axvline(current_capacity, color=THEME["warning"], linestyle="--", linewidth=1.0, label="Current Capacity")
+            ax.set_xlabel("Battery Capacity [Wh]")
+            ax.set_ylabel("Hover Endurance [min]")
+            ax.set_title("Battery Capacity vs Hover Endurance")
+        else:
+            current_capacity = float(cfg["fuel_capacity_kg"])
+            capacities = np.linspace(max(0.01, 0.25 * current_capacity), max(0.01, 2.0 * current_capacity), DESIGN_SWEEP_POINTS)
+            endurance = [
+                propulsion_summary(
+                    HoverCase(rotor=case.rotor, result=case.result, system_type=case.system_type),
+                    {**cfg, "fuel_capacity_kg": float(capacity)},
+                )["hover_endurance_hr"]
+                for capacity in capacities
+            ]
+            ax.plot(capacities, endurance, marker="o", color="tab:red", label="Hover Endurance [hr]")
+            ax.axvline(current_capacity, color=THEME["warning"], linestyle="--", linewidth=1.0, label="Current Capacity")
+            ax.set_xlabel("Fuel Capacity [kg]")
+            ax.set_ylabel("Hover Endurance [hr]")
+            ax.set_title("Fuel Capacity vs Hover Endurance")
+        ax.grid(True)
+        ax.legend()
+        return self._finish_plot(fig)
+
+    def _plot_efficiency_loss_sensitivity(self, case: HoverCase):
+        cfg = self._current_config()
+        shaft_power_W = total_hover_power_W(case)
+        fig, ax = plt.subplots(figsize=PLOT_FIGSIZE)
+        if cfg["propulsion_model"] == "electric":
+            motor_values = np.linspace(0.60, 0.98, 25)
+            loss_values = np.linspace(0.0, 0.30, 25)
+            grid = np.zeros((len(loss_values), len(motor_values)))
+            for row, loss in enumerate(loss_values):
+                for col, motor_eff in enumerate(motor_values):
+                    grid[row, col] = electric_summary(
+                        shaft_power_W,
+                        {
+                            **cfg,
+                            "motor_efficiency": float(motor_eff),
+                            "transmission_loss": float(loss),
+                        },
+                    )["electric_input_W"] / 1000.0
+            image = ax.imshow(
+                grid,
+                extent=[motor_values[0], motor_values[-1], loss_values[0], loss_values[-1]],
+                origin="lower",
+                aspect="auto",
+                cmap="viridis",
+            )
+            ax.scatter([float(cfg["motor_efficiency"])], [float(cfg["transmission_loss"])], color=THEME["warning"], marker="x", label="Current")
+            colorbar = fig.colorbar(image, ax=ax)
+            colorbar.set_label("Electric Input [kW]")
+            ax.set_xlabel("Motor Efficiency")
+            ax.set_ylabel("Transmission Loss")
+            ax.set_title("Electric Efficiency and Loss Sensitivity")
+        else:
+            sfc_current = float(cfg["specific_fuel_consumption_kg_per_kWh"])
+            sfc_values = np.linspace(max(0.05, 0.5 * sfc_current), max(0.05, 1.5 * sfc_current), 25)
+            loss_values = np.linspace(0.0, 0.30, 25)
+            grid = np.zeros((len(loss_values), len(sfc_values)))
+            for row, loss in enumerate(loss_values):
+                for col, sfc in enumerate(sfc_values):
+                    grid[row, col] = propulsion_summary(
+                        HoverCase(rotor=case.rotor, result=case.result, system_type=case.system_type),
+                        {
+                            **cfg,
+                            "specific_fuel_consumption_kg_per_kWh": float(sfc),
+                            "transmission_loss": float(loss),
+                        },
+                    )["fuel_flow_kg_hr"]
+            image = ax.imshow(
+                grid,
+                extent=[sfc_values[0], sfc_values[-1], loss_values[0], loss_values[-1]],
+                origin="lower",
+                aspect="auto",
+                cmap="magma",
+            )
+            ax.scatter([sfc_current], [float(cfg["transmission_loss"])], color=THEME["warning"], marker="x", label="Current")
+            colorbar = fig.colorbar(image, ax=ax)
+            colorbar.set_label("Fuel Flow [kg/hr]")
+            ax.set_xlabel("Specific Fuel Consumption [kg/kWh]")
+            ax.set_ylabel("Transmission Loss")
+            ax.set_title("Engine Fuel Sensitivity")
+        ax.legend()
+        return self._finish_plot(fig)
+
+    def _plot_payload_endurance_sweep(self, case: HoverCase):
+        base_config = self._current_config()
+        station_rows = self._station_rows()
+        provider = self._xfoil_provider_for_config(base_config)
+        gross = float(base_config["gross"])
+        gross_values = np.linspace(
+            max(MIN_SWEEP_GROSS_MASS_KG, 0.5 * gross),
+            max(MIN_SWEEP_GROSS_MASS_KG, 2.0 * gross),
+            DESIGN_SWEEP_POINTS,
+        )
+        self._log(
+            "Calculating payload endurance sweep "
+            f"from {gross_values[0] - gross:+.2f} to {gross_values[-1] - gross:+.2f} [kg] relative payload."
+        )
+        sweep = self._collect_hover_sweep(
+            "Payload endurance sweep",
+            base_config,
+            station_rows,
+            provider,
+            gross_values,
+            lambda value: {"gross": float(value)},
+        )
+
+        payload_delta = []
+        endurance = []
+        collectives_by_label: dict[str, list[float]] = {}
+        for value, cfg, sweep_case in sweep:
+            payload_delta.append(float(value) - gross)
+            power = self._power_metrics(sweep_case, cfg)
+            endurance.append(power["endurance"])
+            for label, hover in self._iter_hover_results(sweep_case):
+                collectives_by_label.setdefault(label, []).append(hover.collective_pitch_deg)
+
+        fig, (ax_endurance, ax_collective) = plt.subplots(2, 1, figsize=PLOT_FIGSIZE, sharex=True)
+        ax_endurance.plot(payload_delta, endurance, marker="o", color="tab:green", label=self._endurance_label(base_config))
+        ax_endurance.axvline(0.0, color=THEME["warning"], linestyle="--", linewidth=1.0, label="Current Gross Mass")
+        ax_endurance.set_ylabel(self._endurance_label(base_config))
+        ax_endurance.set_title("Endurance vs Payload Delta")
+        ax_endurance.grid(True)
+        ax_endurance.legend()
+
+        for label, values in collectives_by_label.items():
+            ax_collective.plot(payload_delta, values, marker="o", label=f"{label} Collective [deg]")
+        ax_collective.axvline(0.0, color=THEME["warning"], linestyle="--", linewidth=1.0)
+        ax_collective.set_xlabel("Payload Delta from Current Gross Mass [kg]")
+        ax_collective.set_ylabel("Required Collective [deg]")
+        ax_collective.set_title("Trim Margin vs Payload")
+        ax_collective.grid(True)
+        ax_collective.legend()
+        fig.suptitle("Payload Endurance Sweep")
+        return self._finish_plot(fig)
+
     def _plot_coaxial_interference(self, case: HoverCase):
         if not isinstance(case.result, CoaxialHoverResult):
             raise ValueError("Coaxial interference plot requires a coaxial result.")
@@ -1090,6 +1847,143 @@ class PycopterWebApp:
         ax.set_ylabel("Power [kW]")
         ax.set_title("Coaxial Interference Power")
         ax.grid(True, axis="y")
+        return self._finish_plot(fig)
+
+    def _plot_interference_loss_vs_spacing(self, case: HoverCase):
+        if not isinstance(case.result, CoaxialHoverResult):
+            raise ValueError("Interference loss spacing sweep requires a coaxial result.")
+
+        self._log(
+            "Calculating coaxial spacing sweep for interference loss. "
+            f"Range: z/R {COAXIAL_SPACING_SWEEP_MIN:.2f}..{COAXIAL_SPACING_SWEEP_MAX:.2f}."
+        )
+        base_config = self._current_config()
+        station_rows = self._station_rows()
+        provider = self._xfoil_provider_for_config(base_config)
+        spacings = np.linspace(
+            COAXIAL_SPACING_SWEEP_MIN,
+            COAXIAL_SPACING_SWEEP_MAX,
+            COAXIAL_SPACING_SWEEP_POINTS,
+        )
+        losses = []
+        powers_kW = []
+        yaw_torques = []
+        for spacing in spacings:
+            sweep_case = run_hover_case(
+                {**base_config, "rotor_system_type": "coaxial", "coaxial_spacing_ratio": float(spacing)},
+                station_rows,
+                polar_provider=provider,
+            )
+            result = sweep_case.result
+            if not isinstance(result, CoaxialHoverResult):
+                raise ValueError("Spacing sweep generated a non-coaxial result.")
+            losses.append(result.interference_loss_ratio)
+            powers_kW.append(result.total_power_W / 1000.0)
+            yaw_torques.append(result.net_aircraft_yaw_torque_Nm)
+
+        current_spacing = float(base_config["coaxial_spacing_ratio"])
+        fig, ax = plt.subplots(figsize=PLOT_FIGSIZE)
+        ax.plot(spacings, losses, marker="o", label="Interference Loss")
+        ax.axvline(current_spacing, color=THEME["warning"], linestyle="--", linewidth=1.1, label="Current z/R")
+        ax.set_title("Coaxial Spacing Sweep")
+        ax.set_xlabel("Coaxial Spacing z/R")
+        ax.set_ylabel("Interference Loss")
+        ax.grid(True)
+        ax.legend()
+
+        best_index = int(np.argmin(losses))
+        ax.scatter([spacings[best_index]], [losses[best_index]], color=THEME["accent"], zorder=4)
+        ax.annotate(
+            f"min {losses[best_index]:.3f} at z/R {spacings[best_index]:.2f}",
+            xy=(spacings[best_index], losses[best_index]),
+            xytext=(8, 10),
+            textcoords="offset points",
+            color=THEME["text"],
+            fontsize=9,
+        )
+        self._log(
+            "Spacing sweep complete: "
+            f"{COAXIAL_SPACING_SWEEP_POINTS} points from z/R {COAXIAL_SPACING_SWEEP_MIN:.2f} "
+            f"to {COAXIAL_SPACING_SWEEP_MAX:.2f}; "
+            f"interference loss range {min(losses):.3f}..{max(losses):.3f}; "
+            f"power range {min(powers_kW):.3f}..{max(powers_kW):.3f} [kW]; "
+            f"max |yaw torque| {max(abs(value) for value in yaw_torques):.4f} [Nm]."
+        )
+        return self._finish_plot(fig)
+
+    def _plot_coaxial_thrust_share_yaw(self, case: HoverCase):
+        if not isinstance(case.result, CoaxialHoverResult):
+            raise ValueError("Coaxial thrust-share yaw plot requires a coaxial result.")
+
+        base_config = self._current_config()
+        station_rows = self._station_rows()
+        provider = self._xfoil_provider_for_config(base_config)
+        result = case.result
+        common_collective = 0.5 * (result.upper.collective_pitch_deg + result.lower.collective_pitch_deg)
+        upper_bias = result.upper.collective_pitch_deg - common_collective
+        lower_bias = result.lower.collective_pitch_deg - common_collective
+        yaw_inputs = np.linspace(-5.0, 5.0, CONTROL_SWEEP_POINTS)
+        self._log("Calculating coaxial thrust-share yaw sweep from -5.0 to +5.0 [deg] differential collective.")
+
+        valid = []
+        failures = 0
+        for yaw_input in yaw_inputs:
+            upper_collective = common_collective + upper_bias - float(yaw_input)
+            lower_collective = common_collective + lower_bias + float(yaw_input)
+            try:
+                fixed_case = self._solve_fixed_collective_case(
+                    base_config,
+                    station_rows,
+                    provider,
+                    upper_collective,
+                    lower_collective,
+                )
+                if not isinstance(fixed_case.result, CoaxialHoverResult):
+                    raise ValueError("Fixed differential sweep generated a non-coaxial result.")
+                valid.append((float(yaw_input), fixed_case.result))
+            except Exception:
+                failures += 1
+        if failures:
+            self._log(f"WARNING - Coaxial thrust-share yaw sweep skipped {failures} non-converged points.")
+        if len(valid) < 2:
+            raise ValueError("Coaxial thrust-share yaw sweep could not compute enough valid points.")
+
+        thrust_share = [
+            item[1].upper.total_thrust_N / max(item[1].total_thrust_N, 1e-9)
+            for item in valid
+        ]
+        yaw_torque = [item[1].net_aircraft_yaw_torque_Nm for item in valid]
+        total_thrust = [item[1].total_thrust_N for item in valid]
+        yaw_input_values = [item[0] for item in valid]
+
+        fig, (ax_yaw, ax_thrust) = plt.subplots(2, 1, figsize=PLOT_FIGSIZE, sharex=True)
+        scatter = ax_yaw.scatter(
+            thrust_share,
+            yaw_torque,
+            c=yaw_input_values,
+            cmap="coolwarm",
+            label="Differential Collective",
+        )
+        ax_yaw.plot(thrust_share, yaw_torque, color=THEME["muted"], linewidth=0.9, alpha=0.8)
+        ax_yaw.axhline(0.0, color=THEME["warning"], linestyle="--", linewidth=1.0)
+        current_share = result.upper.total_thrust_N / max(result.total_thrust_N, 1e-9)
+        ax_yaw.axvline(current_share, color=THEME["warning"], linestyle=":", linewidth=1.0, label="Current Share")
+        colorbar = fig.colorbar(scatter, ax=ax_yaw)
+        colorbar.set_label("Yaw Input [deg]")
+        ax_yaw.set_ylabel("Aircraft Yaw Torque [Nm]")
+        ax_yaw.set_title("Yaw Torque vs Upper-Rotor Thrust Share")
+        ax_yaw.grid(True)
+        ax_yaw.legend()
+
+        ax_thrust.plot(thrust_share, total_thrust, marker="o", label="Total Thrust [N]")
+        ax_thrust.axhline(result.total_thrust_N, color=THEME["warning"], linestyle="--", linewidth=1.0, label="Current Thrust")
+        ax_thrust.axvline(current_share, color=THEME["warning"], linestyle=":", linewidth=1.0)
+        ax_thrust.set_xlabel("Upper Rotor Thrust Share")
+        ax_thrust.set_ylabel("Total Thrust [N]")
+        ax_thrust.set_title("Lift Coupling During Differential Collective")
+        ax_thrust.grid(True)
+        ax_thrust.legend()
+        fig.suptitle("Coaxial Thrust Share and Yaw")
         return self._finish_plot(fig)
 
     def _plot_forward_powers(self, case: HoverCase):
@@ -1145,6 +2039,130 @@ class PycopterWebApp:
         fig.suptitle("Fuel Range and Endurance")
         fig.legend(loc="upper right")
         return self._finish_plot(fig)
+
+    def _collect_hover_sweep(
+        self,
+        label: str,
+        base_config: dict[str, Any],
+        station_rows: list[dict[str, Any]],
+        provider,
+        values,
+        updates_for_value,
+    ) -> list[tuple[float, dict[str, Any], HoverCase]]:
+        valid: list[tuple[float, dict[str, Any], HoverCase]] = []
+        failures = 0
+        first_error = ""
+        for value in values:
+            cfg = normalize_config({**base_config, **updates_for_value(value)})
+            try:
+                valid.append((float(value), cfg, run_hover_case(cfg, station_rows, polar_provider=provider)))
+            except Exception as err:
+                failures += 1
+                if not first_error:
+                    first_error = str(err)
+        if failures:
+            detail = f"; first error: {first_error}" if first_error else ""
+            self._log(f"WARNING - {label} skipped {failures}/{len(values)} points{detail}.")
+        if len(valid) < 2:
+            raise ValueError(f"{label} could not compute enough valid points.")
+        return valid
+
+    def _solve_fixed_collective_case(
+        self,
+        config: dict[str, Any],
+        station_rows: list[dict[str, Any]],
+        provider,
+        upper_collective_deg: float,
+        lower_collective_deg: float | None = None,
+    ) -> HoverCase:
+        cfg = normalize_config(config)
+        settings = build_solver_settings(cfg)
+        upper_rotor = build_rotor_spec(cfg, station_rows, name="upper")
+        operating_point = OperatingPoint(
+            density_kg_m3=float(cfg["density"]),
+            kinematic_viscosity_m2_s=float(cfg["kinematic_viscosity_m2_s"]),
+            gross_mass_kg=float(cfg["gross"]),
+            collective_pitch_deg=float(upper_collective_deg),
+            trim_mode="fixed_collective",
+        )
+        if cfg["rotor_system_type"] == "coaxial":
+            lower_collective = float(
+                upper_collective_deg if lower_collective_deg is None else lower_collective_deg
+            )
+            lower_rotor = build_rotor_spec(
+                cfg,
+                station_rows,
+                name="lower",
+                scale=float(cfg["lower_rotor_scale"]),
+                headspeed_ratio=float(cfg["lower_rotor_speed_ratio"]),
+                rotation_direction=-1,
+            )
+            result = solve_coaxial_hover(
+                CoaxialSpec(
+                    upper_rotor=upper_rotor,
+                    lower_rotor=lower_rotor,
+                    spacing_ratio=float(cfg["coaxial_spacing_ratio"]),
+                    trim_mode="equal_collective",
+                    lower_collective_offset_deg=lower_collective - float(upper_collective_deg),
+                ),
+                operating_point,
+                polar_provider=provider,
+                settings=settings,
+            )
+            return HoverCase(rotor=upper_rotor, result=result, system_type="coaxial")
+
+        solver = HoverSolver(provider, settings)
+        result = solver.solve_fixed_collective(upper_rotor, operating_point, float(upper_collective_deg))
+        return HoverCase(rotor=upper_rotor, result=result, system_type="single")
+
+    def _power_metrics(self, case: HoverCase, config: dict[str, Any]) -> dict[str, float]:
+        prop = propulsion_summary(case, config)
+        if config["propulsion_model"] == "electric":
+            return {
+                "shaft_kW": total_hover_power_W(case) / 1000.0,
+                "input_kW": prop["electric_input_W"] / 1000.0,
+                "endurance": prop["hover_endurance_min"],
+            }
+        return {
+            "shaft_kW": total_hover_power_W(case) / 1000.0,
+            "input_kW": prop["engine_input_W"] / 1000.0,
+            "endurance": prop["hover_endurance_hr"],
+        }
+
+    def _input_power_label(self, config: dict[str, Any]) -> str:
+        if config["propulsion_model"] == "electric":
+            return "Electric Input [kW]"
+        return "Engine Input [kW]"
+
+    def _endurance_label(self, config: dict[str, Any]) -> str:
+        if config["propulsion_model"] == "electric":
+            return "Hover Endurance [min]"
+        return "Hover Endurance [hr]"
+
+    def _mean_collective_deg(self, case: HoverCase) -> float:
+        collectives = [hover.collective_pitch_deg for _, hover in self._iter_hover_results(case)]
+        return float(np.mean(collectives)) if collectives else 0.0
+
+    def _max_load_value(self, case: HoverCase, attr_name: str) -> float:
+        values = [
+            float(getattr(load, attr_name))
+            for _, hover in self._iter_hover_results(case)
+            for load in hover.element_loads
+        ]
+        return max(values) if values else 0.0
+
+    def _mean_load_value(self, case: HoverCase, attr_name: str) -> float:
+        values = [
+            float(getattr(load, attr_name))
+            for _, hover in self._iter_hover_results(case)
+            for load in hover.element_loads
+        ]
+        return float(np.mean(values)) if values else 0.0
+
+    def _net_aircraft_yaw_torque(self, case: HoverCase) -> float:
+        if isinstance(case.result, CoaxialHoverResult):
+            return case.result.net_aircraft_yaw_torque_Nm
+        return case.result.aircraft_yaw_torque_Nm
 
     def _iter_hover_results(self, case: HoverCase):
         if isinstance(case.result, CoaxialHoverResult):
@@ -1208,9 +2226,20 @@ class PycopterWebApp:
             "Section Coefficients vs Radius",
             "Pitch Moment vs Radius",
             "Cumulative Thrust and Power",
+            "Stall Margin vs Radius",
+            "Geometry Load Contribution",
+            "Disk Loading Sensitivity",
+            "Rotor Diameter Sizing",
+            "Reference RPM Sweep",
+            "Collective Authority Curve",
+            "Energy Capacity vs Endurance",
+            "Efficiency and Loss Sensitivity",
+            "Payload Endurance Sweep",
         ]
         if self.current_case and self.current_case.system_type == "coaxial":
             options.append("Coaxial Interference")
+            options.append("Interference Loss vs Spacing")
+            options.append("Coaxial Thrust Share and Yaw")
         if self.current_case and self.current_case.system_type == "single":
             options.append("Forward Flight Powers vs Velocity")
             if self._propulsion_model() == "electric":
@@ -1223,14 +2252,24 @@ class PycopterWebApp:
 
     def _sync_enabled_state(self) -> None:
         is_coaxial = self.rotor_system_type.value == "coaxial"
-        for widget in (self.coaxial_spacing, self.coaxial_trim_mode, self.lower_collective_offset, self.lower_rotor_scale):
+        for widget in (
+            self.coaxial_spacing,
+            self.coaxial_trim_mode,
+            self.lower_rotor_speed_ratio,
+            self.lower_collective_offset,
+            self.lower_rotor_scale,
+        ):
             widget.disabled = not is_coaxial
+        self.lower_headspeed_rpm.disabled = True
         self.headspeed_rpm.disabled = self.headspeed_input_mode.value != "rpm"
         self.tip_speed_mach.disabled = self.headspeed_input_mode.value != "tip_mach"
         self.station_table.disabled = self.geometry_mode.value != "station_table"
         self.calc_hover_btn.disabled = self.initialized_rotor is None
         self.generate_plot_btn.disabled = self.initialized_rotor is None and self.current_case is None
         self.calc_forward_btn.disabled = self.current_case is None or self.current_case.system_type != "single"
+
+    def _update_lower_rpm_display(self) -> None:
+        self.lower_headspeed_rpm.value = float(self.headspeed_rpm.value) * float(self.lower_rotor_speed_ratio.value)
 
     def _xfoil_provider_for_config(self, config: dict[str, Any]):
         key = self._xfoil_provider_cache_key(config)
@@ -1267,25 +2306,12 @@ class PycopterWebApp:
     def _log(self, text: str) -> None:
         prefix = datetime.now().strftime("%H:%M:%S")
         self.output_lines.append("" if text == "" else f"[{prefix}] {text}")
-        self.output_log.object = self._render_output_log()
-
-    def _render_output_log(self) -> str:
-        self._log_render_count += 1
-        anchor_id = f"pycopter-log-end-{self._log_render_count}"
-        escaped_text = escape("\n".join(self.output_lines[-300:]))
-        return (
-            f'<pre class="pycopter-log-text">{escaped_text}</pre>'
-            f'<span id="{anchor_id}"></span>'
-            "<script>"
-            "requestAnimationFrame(function(){"
-            f'var anchor=document.getElementById("{anchor_id}");'
-            "if(!anchor){return;}"
-            'var log=anchor.closest(".pycopter-log");'
-            "if(log){log.scrollTop=log.scrollHeight;}"
-            'anchor.scrollIntoView({block:"end"});'
-            "});"
-            "</script>"
-        )
+        if len(self.output_lines) > 300:
+            self.output_lines = self.output_lines[-300:]
+            self.output_log.clear()
+            self.output_log.write("\n".join(self.output_lines) + "\n")
+            return
+        self.output_log.write(("\n" if text == "" else f"[{prefix}] {text}\n"))
 
 
 def create_app():

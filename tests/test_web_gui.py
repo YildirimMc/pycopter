@@ -65,6 +65,43 @@ class TestWebGuiCalculations(unittest.TestCase):
         self.assertAlmostEqual(9.81, case.result.total_thrust_N, delta=0.2)
         self.assertGreater(case.result.total_power_W, 0.0)
         self.assertGreater(case.result.interference_power_delta_W, 0.0)
+        self.assertAlmostEqual(
+            case.result.net_aircraft_yaw_torque_Nm,
+            case.result.upper.aircraft_yaw_torque_Nm + case.result.lower.aircraft_yaw_torque_Nm,
+        )
+
+    def test_coaxial_lower_speed_ratio_is_applied_to_lower_rotor(self):
+        config = normalize_config(
+            {
+                **self.config,
+                "rotor_system_type": "coaxial",
+                "headspeed_rpm": 2400.0,
+                "lower_rotor_speed_ratio": 1.10,
+            }
+        )
+
+        def capture_spec(coaxial_spec, *_args, **_kwargs):
+            self.assertAlmostEqual(2400.0, coaxial_spec.upper_rotor.headspeed_rpm)
+            self.assertAlmostEqual(2640.0, coaxial_spec.lower_rotor.headspeed_rpm)
+            raise RuntimeError("captured")
+
+        with patch("gui.calculations.solve_coaxial_hover", side_effect=capture_spec):
+            with self.assertRaisesRegex(RuntimeError, "captured"):
+                run_hover_case(config, DEFAULT_STATION_ROWS, polar_provider=self.provider)
+
+    def test_default_coaxial_trim_balances_total_thrust_and_torque(self):
+        config = normalize_config({**self.config, "rotor_system_type": "coaxial"})
+
+        self.assertEqual("torque_balance", config["coaxial_trim_mode"])
+        case = run_hover_case(config, DEFAULT_STATION_ROWS, polar_provider=self.provider)
+
+        self.assertAlmostEqual(9.81, case.result.total_thrust_N, delta=0.2)
+        self.assertAlmostEqual(0.0, case.result.net_aircraft_yaw_torque_Nm, delta=1e-3)
+        self.assertNotAlmostEqual(
+            case.result.upper.total_thrust_N,
+            case.result.lower.total_thrust_N,
+            delta=0.05,
+        )
 
     def test_electric_and_fossil_summaries_do_not_mix_outputs(self):
         electric = electric_summary(100.0, self.config)
@@ -177,6 +214,22 @@ class TestWebGuiApp(unittest.TestCase):
 
         self.assertEqual("fossil", app._current_config()["propulsion_model"])
         self.assertNotIn("Electric Range vs Velocity", app.plot_select.options)
+        self.assertNotIn("Interference Loss vs Spacing", app.plot_select.options)
+
+    def test_coaxial_speed_ratio_round_trips_through_gui_config(self):
+        app = PycopterWebApp()
+        app._apply_config(
+            {
+                **DEFAULT_CONFIG,
+                "rotor_system_type": "coaxial",
+                "headspeed_rpm": 2300.0,
+                "lower_rotor_speed_ratio": 1.05,
+            },
+            DEFAULT_STATION_ROWS,
+        )
+
+        self.assertAlmostEqual(1.05, app._current_config()["lower_rotor_speed_ratio"])
+        self.assertAlmostEqual(2415.0, app.lower_headspeed_rpm.value)
 
     def test_reuses_xfoil_provider_for_non_xfoil_setting_changes(self):
         app = PycopterWebApp()
@@ -192,6 +245,7 @@ class TestWebGuiApp(unittest.TestCase):
                     {
                         **config,
                         "coaxial_spacing_ratio": float(config["coaxial_spacing_ratio"]) + 0.1,
+                        "lower_rotor_speed_ratio": float(config["lower_rotor_speed_ratio"]) + 0.05,
                         "gross": float(config["gross"]) + 1.0,
                     }
                 ),
@@ -208,6 +262,149 @@ class TestWebGuiApp(unittest.TestCase):
                 ),
             )
             self.assertEqual(2, factory.call_count)
+
+    def test_result_tables_are_read_only_and_copyable(self):
+        app = PycopterWebApp()
+        provider = LinearPolarProvider(
+            lift_slope_per_rad=5.7,
+            cd0=0.012,
+            induced_drag_factor=0.015,
+            cm0=-0.02,
+        )
+        config = normalize_config({**DEFAULT_CONFIG, "new_polars": False, "blade_element_count": 20})
+        case = run_hover_case(config, DEFAULT_STATION_ROWS, polar_provider=provider)
+
+        app._update_summary_table(case, config)
+        app._update_load_table(case)
+
+        self.assertTrue(app.summary_table._configuration["clipboard"])
+        self.assertTrue(app.load_table._configuration["clipboard"])
+        self.assertEqual({"editable": False}, app.summary_table._configuration["columnDefaults"])
+        self.assertEqual({"editable": False}, app.load_table._configuration["columnDefaults"])
+        self.assertTrue(all(editor is None for editor in app.summary_table.editors.values()))
+        self.assertTrue(all(editor is None for editor in app.load_table.editors.values()))
+        self.assertEqual("fit_data_table", app.load_table.layout)
+
+    def test_coaxial_summary_reports_signed_yaw_torque(self):
+        app = PycopterWebApp()
+        provider = LinearPolarProvider(
+            lift_slope_per_rad=5.7,
+            cd0=0.012,
+            induced_drag_factor=0.015,
+            cm0=-0.02,
+        )
+        config = normalize_config(
+            {
+                **DEFAULT_CONFIG,
+                "rotor_system_type": "coaxial",
+                "new_polars": False,
+                "blade_element_count": 20,
+            }
+        )
+        case = run_hover_case(config, DEFAULT_STATION_ROWS, polar_provider=provider)
+
+        app._update_summary_table(case, config)
+        metrics = set(app.summary_table.value["Metric"])
+
+        self.assertIn("Net Aircraft Yaw Torque [Nm]", metrics)
+        self.assertIn("Net Aircraft Yaw Direction", metrics)
+        self.assertIn("Upper Aircraft Yaw Torque [Nm]", metrics)
+        self.assertIn("Lower Aircraft Yaw Torque [Nm]", metrics)
+
+    def test_coaxial_plot_options_include_spacing_sweep(self):
+        app = PycopterWebApp()
+        provider = LinearPolarProvider(
+            lift_slope_per_rad=5.7,
+            cd0=0.012,
+            induced_drag_factor=0.015,
+            cm0=-0.02,
+        )
+        config = normalize_config(
+            {
+                **DEFAULT_CONFIG,
+                "rotor_system_type": "coaxial",
+                "new_polars": False,
+                "blade_element_count": 12,
+            }
+        )
+        app.current_case = run_hover_case(config, DEFAULT_STATION_ROWS, polar_provider=provider)
+        app._update_plot_options()
+
+        self.assertIn("Interference Loss vs Spacing", app.plot_select.options)
+
+    def test_coaxial_spacing_sweep_plot_uses_current_parameters(self):
+        app = PycopterWebApp()
+        provider = LinearPolarProvider(
+            lift_slope_per_rad=5.7,
+            cd0=0.012,
+            induced_drag_factor=0.015,
+            cm0=-0.02,
+        )
+        config = normalize_config(
+            {
+                **DEFAULT_CONFIG,
+                "rotor_system_type": "coaxial",
+                "new_polars": False,
+                "blade_element_count": 10,
+            }
+        )
+        app._apply_config(config, DEFAULT_STATION_ROWS)
+        app.current_case = run_hover_case(config, DEFAULT_STATION_ROWS, polar_provider=provider)
+        with patch.object(app, "_xfoil_provider_for_config", return_value=provider):
+            fig = app._plot_interference_loss_vs_spacing(app.current_case)
+
+        self.assertEqual("Coaxial Spacing Sweep", fig.axes[0].get_title())
+        self.assertEqual("Coaxial Spacing z/R", fig.axes[0].get_xlabel())
+        self.assertEqual("Interference Loss", fig.axes[0].get_ylabel())
+        self.assertIn("Spacing sweep complete", "\n".join(app.output_lines))
+
+    def test_plot_save_callback_returns_png_after_generating_plot(self):
+        app = PycopterWebApp()
+
+        app._generate_plot()
+        data = app._save_plot_callback().getvalue()
+
+        self.assertFalse(app.save_plot_download.disabled)
+        self.assertTrue(data.startswith(b"\x89PNG\r\n\x1a\n"))
+        self.assertTrue(app.save_plot_download.filename.endswith(".png"))
+
+    def test_static_export_callbacks_warn_before_results_exist(self):
+        app = PycopterWebApp()
+
+        self.assertFalse(app.save_plot_download.disabled)
+        self.assertFalse(app.save_summary_download.disabled)
+        self.assertFalse(app.save_loads_download.disabled)
+
+        self.assertEqual(b"", app._save_plot_callback().getvalue())
+        self.assertEqual(b"", app._save_summary_callback().getvalue())
+        self.assertEqual(b"", app._save_loads_callback().getvalue())
+
+        output = "\n".join(app.output_lines)
+        self.assertIn("No plot has been generated yet", output)
+        self.assertIn("No summary table has been generated yet", output)
+        self.assertIn("No blade element loads table has been generated yet", output)
+
+    def test_summary_and_load_exports_return_csv_after_hover(self):
+        app = PycopterWebApp()
+        provider = LinearPolarProvider(
+            lift_slope_per_rad=5.7,
+            cd0=0.012,
+            induced_drag_factor=0.015,
+            cm0=-0.02,
+        )
+        config = normalize_config({**DEFAULT_CONFIG, "new_polars": False, "blade_element_count": 20})
+        case = run_hover_case(config, DEFAULT_STATION_ROWS, polar_provider=provider)
+        app.current_case = case
+        app._update_summary_table(case, config)
+        app._update_load_table(case)
+
+        summary = app._save_summary_callback().getvalue().decode("utf-8")
+        loads = app._save_loads_callback().getvalue().decode("utf-8")
+
+        self.assertIn("Metric,Value", summary)
+        self.assertIn("Total Thrust [N]", summary)
+        self.assertIn("r_m,r_over_R", loads)
+        self.assertIn("pitch_moment_Nm", loads)
 
 
 if __name__ == "__main__":

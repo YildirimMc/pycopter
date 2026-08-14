@@ -68,8 +68,39 @@ class TestBemtHover(unittest.TestCase):
         self.assertAlmostEqual(result.per_blade_thrust_N, load_sum, delta=1e-6)
         self.assertAlmostEqual(result.per_blade_torque_Nm, torque_sum, delta=1e-6)
         self.assertAlmostEqual(
+            result.aircraft_yaw_torque_Nm,
+            -result.total_torque_Nm,
+            delta=1e-6,
+        )
+        self.assertAlmostEqual(
             result.total_thrust_N,
             result.per_blade_thrust_N * self.rotor.num_blades,
+            delta=1e-6,
+        )
+
+    def test_yaw_reaction_torque_uses_rotation_direction_sign(self):
+        clockwise_rotor = RotorSpec.from_uniform_blade(
+            airfoil="naca0012",
+            num_blades=2,
+            chord_m=0.035,
+            rotor_diameter_m=0.7,
+            headspeed_rpm=2500.0,
+            washout_deg=-6.0,
+            root_cutout_ratio=0.12,
+            station_count=4,
+            rotation_direction=-1,
+        )
+        solver = HoverSolver(self.polar_provider, self.settings)
+
+        result = solver.solve(
+            clockwise_rotor,
+            OperatingPoint(target_thrust_N=10.0, trim_mode="target_thrust"),
+        )
+
+        self.assertGreater(result.total_torque_Nm, 0.0)
+        self.assertAlmostEqual(
+            result.aircraft_yaw_torque_Nm,
+            result.total_torque_Nm,
             delta=1e-6,
         )
 
@@ -152,7 +183,6 @@ class TestBemtHover(unittest.TestCase):
         result = solve_coaxial_hover(
             CoaxialSpec(
                 upper_rotor=self.rotor,
-                lower_rotor=self.rotor,
                 spacing_ratio=0.25,
                 trim_mode="equal_thrust",
             ),
@@ -165,10 +195,73 @@ class TestBemtHover(unittest.TestCase):
         self.assertGreater(result.lower_external_velocity_mean_m_s, 0.0)
         self.assertGreater(result.interference_power_delta_W, 0.0)
         self.assertGreater(result.interference_loss_ratio, 0.0)
+        self.assertLess(result.upper.aircraft_yaw_torque_Nm, 0.0)
+        self.assertGreater(result.lower.aircraft_yaw_torque_Nm, 0.0)
+        self.assertAlmostEqual(
+            result.net_aircraft_yaw_torque_Nm,
+            result.upper.aircraft_yaw_torque_Nm + result.lower.aircraft_yaw_torque_Nm,
+            delta=1e-6,
+        )
         self.assertAlmostEqual(
             result.upper.total_thrust_N,
             result.lower.total_thrust_N,
             delta=0.2,
+        )
+
+    def test_coaxial_torque_balance_satisfies_weight_and_zero_yaw(self):
+        result = solve_coaxial_hover(
+            CoaxialSpec(
+                upper_rotor=self.rotor,
+                spacing_ratio=0.25,
+                trim_mode="torque_balance",
+            ),
+            OperatingPoint(target_thrust_N=20.0, trim_mode="target_thrust"),
+            polar_provider=self.polar_provider,
+            settings=self.settings,
+        )
+
+        self.assertAlmostEqual(20.0, result.total_thrust_N, delta=0.2)
+        self.assertAlmostEqual(0.0, result.net_aircraft_yaw_torque_Nm, delta=1e-3)
+        self.assertAlmostEqual(
+            result.upper.total_torque_Nm,
+            result.lower.total_torque_Nm,
+            delta=1e-3,
+        )
+        self.assertGreater(result.upper.total_thrust_N, result.lower.total_thrust_N)
+
+    def test_coaxial_torque_balance_honors_lower_rotor_speed_ratio(self):
+        operating_point = OperatingPoint(target_thrust_N=20.0, trim_mode="target_thrust")
+        baseline = solve_coaxial_hover(
+            CoaxialSpec(
+                upper_rotor=self.rotor,
+                spacing_ratio=0.25,
+                trim_mode="torque_balance",
+            ),
+            operating_point,
+            polar_provider=self.polar_provider,
+            settings=self.settings,
+        )
+        faster_lower = solve_coaxial_hover(
+            CoaxialSpec(
+                upper_rotor=self.rotor,
+                spacing_ratio=0.25,
+                trim_mode="torque_balance",
+                lower_rotor_speed_ratio=1.10,
+            ),
+            operating_point,
+            polar_provider=self.polar_provider,
+            settings=self.settings,
+        )
+
+        self.assertAlmostEqual(20.0, faster_lower.total_thrust_N, delta=0.2)
+        self.assertAlmostEqual(0.0, faster_lower.net_aircraft_yaw_torque_Nm, delta=1e-3)
+        self.assertAlmostEqual(
+            self.rotor.headspeed_rpm * 1.10,
+            CoaxialSpec(upper_rotor=self.rotor, lower_rotor_speed_ratio=1.10).resolved_lower_rotor.headspeed_rpm,
+        )
+        self.assertLess(
+            faster_lower.lower.collective_pitch_deg,
+            baseline.lower.collective_pitch_deg,
         )
 
     def test_legacy_rotor_hover_uses_new_solver_outputs(self):
@@ -395,6 +488,29 @@ class TestXfoilProviderBounds(unittest.TestCase):
                 coeffs = provider.get_coefficients("naca0012", 5.0, 100000.0, 0.1)
 
         self.assertGreater(coeffs.cl, 0.0)
+
+    def test_xfoil_provider_does_not_launch_when_cache_missing_and_new_polar_is_false(self):
+        class FakeXfoil:
+            error_message = ""
+
+            def __init__(self, new_polar=True, timeout=60):
+                self.new_polar = new_polar
+                self.timeout = timeout
+                self.repo_root = Path.cwd()
+                self.output_path = self.repo_root / "data" / "XFOIL6.99" / "polar.txt"
+                self.output_path_for_xfoil = "data/XFOIL6.99/polar.txt"
+
+            def simulate(self, airfoil, mach, reynolds, alpha_min_deg, alpha_max_deg):
+                raise AssertionError("XFOIL must not launch when new_polar is false")
+
+            def read_polar(self):
+                raise AssertionError("No cache file exists to read")
+
+        with TemporaryDirectory() as tempdir:
+            provider = XfoilPolarProvider(new_polar=False, cache_directory=tempdir)
+            with patch("pycopter.polars.Xfoil", FakeXfoil):
+                with self.assertRaisesRegex(RuntimeError, "XFOIL launch is disabled"):
+                    provider.get_coefficients("naca0012", 5.0, 100000.0, 0.1)
 
     def test_xfoil_provider_prefetch_uses_mpi_executor_with_eight_workers(self):
         calls = {}

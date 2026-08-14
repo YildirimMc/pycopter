@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable, Literal
 
 import numpy as np
@@ -12,7 +12,7 @@ GRAVITY_M_S2 = 9.81
 
 TrimMode = Literal["target_thrust", "fixed_collective"]
 LossModel = Literal["prandtl", "none"]
-CoaxialTrimMode = Literal["equal_thrust", "equal_collective"]
+CoaxialTrimMode = Literal["torque_balance", "equal_thrust", "equal_collective"]
 
 
 @dataclass(frozen=True)
@@ -290,6 +290,7 @@ class HoverResult:
     per_blade_thrust_N: float
     total_torque_Nm: float
     per_blade_torque_Nm: float
+    aircraft_yaw_torque_Nm: float
     power_W: float
     induced_power_W: float
     profile_power_W: float
@@ -317,18 +318,34 @@ class CoaxialSpec:
     upper_rotor: RotorSpec
     lower_rotor: RotorSpec | None = None
     spacing_ratio: float = 0.25
-    trim_mode: CoaxialTrimMode = "equal_thrust"
+    trim_mode: CoaxialTrimMode = "torque_balance"
     lower_collective_offset_deg: float = 0.0
+    lower_rotor_speed_ratio: float = 1.0
 
     def __post_init__(self) -> None:
         if self.spacing_ratio <= 0:
             raise ValueError("spacing_ratio must be positive.")
-        if self.trim_mode not in ("equal_thrust", "equal_collective"):
-            raise ValueError("trim_mode must be 'equal_thrust' or 'equal_collective'.")
+        if self.lower_rotor_speed_ratio <= 0:
+            raise ValueError("lower_rotor_speed_ratio must be positive.")
+        if self.trim_mode not in ("torque_balance", "equal_thrust", "equal_collective"):
+            raise ValueError(
+                "trim_mode must be 'torque_balance', 'equal_thrust', or 'equal_collective'."
+            )
 
     @property
     def resolved_lower_rotor(self) -> RotorSpec:
-        return self.lower_rotor or self.upper_rotor
+        lower = self.lower_rotor or replace(
+            self.upper_rotor,
+            name="lower",
+            rotation_direction=-self.upper_rotor.rotation_direction,
+        )
+        if self.lower_rotor_speed_ratio == 1.0 and self.lower_rotor is not None:
+            return lower
+        return replace(
+            lower,
+            headspeed_rpm=self.upper_rotor.headspeed_rpm * self.lower_rotor_speed_ratio,
+            tip_speed_mach=None,
+        )
 
 
 @dataclass(frozen=True)
@@ -341,6 +358,7 @@ class CoaxialHoverResult:
     isolated_lower: HoverResult
     total_thrust_N: float
     total_power_W: float
+    net_aircraft_yaw_torque_Nm: float
     interference_power_delta_W: float
     interference_loss_ratio: float
     lower_external_velocity_mean_m_s: float

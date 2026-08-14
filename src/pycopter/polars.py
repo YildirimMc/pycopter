@@ -428,8 +428,10 @@ def _run_xfoil_polar_job(job: XfoilPolarJob) -> XfoilPolarJobResult:
     xfoil = Xfoil(new_polar=job.new_polar, timeout=job.timeout)
     _configure_xfoil_output_for_path(xfoil, job.cache_path)
 
-    if not job.new_polar and job.cache_path.exists():
+    if job.cache_path.exists():
         return job.result_from_table(xfoil.read_polar())
+    if not job.new_polar:
+        raise RuntimeError(_missing_cached_polar_message(job))
 
     if not xfoil.simulate(
         job.airfoil,
@@ -441,6 +443,15 @@ def _run_xfoil_polar_job(job: XfoilPolarJob) -> XfoilPolarJobResult:
         raise RuntimeError(xfoil.error_message)
 
     return job.result_from_table(xfoil.read_polar())
+
+
+def _missing_cached_polar_message(job: XfoilPolarJob) -> str:
+    return (
+        "Cached XFOIL polar is missing and XFOIL launch is disabled. "
+        "Enable 'Run XFOIL For Missing Polars' or choose a cache directory "
+        f"containing this bin: airfoil={job.airfoil}, Re={job.reynolds:.0f}, "
+        f"Mach={job.mach:.3f}, alpha={job.alpha_min_deg:g}..{job.alpha_max_deg:g} deg."
+    )
 
 
 @dataclass
@@ -593,6 +604,12 @@ class XfoilPolarProvider:
                     mach_key,
                 )
                 continue
+            if not self.new_polar:
+                raise RuntimeError(
+                    _missing_cached_polar_message(
+                        self._create_job(airfoil_key, reynolds_key, mach_key)
+                    )
+                )
             jobs.append(self._create_job(airfoil_key, reynolds_key, mach_key))
             queued_keys.add(key)
 
