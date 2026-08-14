@@ -14,6 +14,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import panel as pn
+import param
 
 from pycopter import (
     CoaxialHoverResult,
@@ -48,9 +49,20 @@ from .calculations import (
 )
 
 
-PLOT_FIGSIZE = (7.0, 8.0)
-RESULT_PANE_HEIGHT = 780
-RESULT_TABS_HEIGHT = 820
+# Wide enough for the 410 px control stack plus panel padding and the column
+# scrollbar, so a scrolling input column never clips its own widgets.
+INPUT_COLUMN_WIDTH = 448
+LOG_HEIGHT = 132
+# Figure inches are derived from CSS pixels at the 96 dpi CSS reference, while
+# the pane rasterizes at PLOT_RENDER_DPI. The 1.5x ratio supersamples the PNG so
+# it stays sharp on high-density displays while axis text keeps its true size.
+PLOT_CSS_DPI = 96.0
+PLOT_RENDER_DPI = 144
+# Fallback plot size in inches, used before the browser reports the result-area
+# size and in headless contexts such as the unit tests.
+PLOT_FIGSIZE = (7.6, 6.4)
+PLOT_MIN_SIZE_IN = (4.6, 3.6)
+PLOT_MAX_SIZE_IN = (19.0, 13.0)
 RESULT_TABLE_CONFIGURATION = {
     "clipboard": True,
     "clipboardCopyRowRange": "selected",
@@ -84,10 +96,46 @@ RAW_CSS = """
 html,
 body {
     background: #111315;
+    /* The dashboard is a fixed-height app shell: every region scrolls
+       internally so expanding a section never grows or clips the page. */
+    height: 100%;
+    overflow: hidden;
 }
 .pycopter-shell {
     font-family: Arial, Helvetica, sans-serif;
     color: #e7ecf2;
+    height: 100%;
+    min-height: 0;
+}
+/* Panel wraps each child in its own div; these keep the flex chain able to
+   shrink so the inner scroll containers, not the page, absorb overflow. */
+.pycopter-shell > div,
+.pycopter-body > div,
+.pycopter-results > div {
+    min-height: 0;
+}
+.pycopter-body {
+    min-height: 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+}
+.pycopter-column {
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    flex: 0 0 auto;
+}
+.pycopter-results {
+    min-width: 520px;
+    min-height: 0;
+    flex: 1 1 auto;
+}
+.pycopter-toolbar {
+    flex: 0 0 auto;
+    overflow-x: auto;
+}
+.pycopter-log-region {
+    flex: 0 0 auto;
 }
 .pycopter-panel {
     border: 1px solid #3a4048;
@@ -104,10 +152,10 @@ body {
     font-weight: 600;
 }
 .pycopter-log {
-    height: 150px;
+    height: 100px;
 }
 .pycopter-log .xterm {
-    height: 150px !important;
+    height: 100px !important;
     font-family: Consolas, "Courier New", monospace;
     font-size: 12px;
     background: #121416;
@@ -149,11 +197,21 @@ button.bk-btn:disabled,
 .pycopter-plot-frame {
     background: #141619;
     border: 1px solid #3a4048;
+    min-height: 0;
+    overflow: hidden;
+}
+/* Keep the rendered figure inside its frame at any window size. The figure is
+   also re-rendered at the measured frame size, so this only smooths the gap
+   between a resize and the next Generate Plot. */
+.pycopter-plot-frame img {
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
 }
 .pycopter-table-scroll {
-    max-width: 690px;
     overflow-x: auto;
     overflow-y: hidden;
+    min-height: 0;
 }
 .pycopter-result-table .tabulator-tableholder {
     overflow-x: auto !important;
@@ -296,6 +354,63 @@ input[type="file"]::file-selector-button:hover {
 """
 
 
+class ResultAreaProbe(pn.reactive.ReactiveHTML):
+    """Reports the on-screen size of the plot frame back to Python.
+
+    Panel cannot tell the server how large a pane ended up in the browser, so
+    matplotlib figures would otherwise be drawn at a guessed size and then
+    rescaled by the browser, which shrinks axis labels on small monitors. This
+    zero-height probe measures the plot frame and syncs its pixel size so
+    figures can be drawn at their true display size.
+    """
+
+    width_px = param.Integer(default=0)
+    height_px = param.Integer(default=0)
+
+    _template = '<div id="probe" style="display:none"></div>'
+    _scripts = {
+        "render": """
+            const SELECTOR = '.pycopter-plot-frame';
+            // Panel renders each component into its own shadow root, so the
+            // plot frame is invisible to a plain document.querySelector.
+            function findFrame(root) {
+                for (const el of root.querySelectorAll('*')) {
+                    if (el.matches && el.matches(SELECTOR)) { return el; }
+                    if (el.shadowRoot) {
+                        const found = findFrame(el.shadowRoot);
+                        if (found) { return found; }
+                    }
+                }
+                return null;
+            }
+            function report() {
+                const frame = findFrame(document);
+                if (!frame) { return false; }
+                const box = frame.getBoundingClientRect();
+                if (box.width < 80 || box.height < 80) { return false; }
+                const width = Math.round(box.width);
+                const height = Math.round(box.height);
+                if (width !== data.width_px || height !== data.height_px) {
+                    data.width_px = width;
+                    data.height_px = height;
+                }
+                return true;
+            }
+            function observe(attempt) {
+                const frame = findFrame(document);
+                if (frame && window.ResizeObserver) {
+                    new ResizeObserver(report).observe(frame);
+                    report();
+                    return;
+                }
+                if (attempt < 40) { setTimeout(() => observe(attempt + 1), 150); }
+            }
+            window.addEventListener('resize', report);
+            observe(0);
+        """
+    }
+
+
 class PycopterWebApp:
     """Stateful Panel application."""
 
@@ -306,6 +421,8 @@ class PycopterWebApp:
         self._xfoil_provider = None
         self._xfoil_provider_key: tuple[Any, ...] | None = None
         self.output_lines: list[str] = []
+        self._plot_area_size_px: tuple[int, int] | None = None
+        self._current_plot_name = ""
         self.plot_fig = self._blank_figure("Initialize rotor, then calculate hover.")
         self._plot_save_available = False
 
@@ -324,35 +441,51 @@ class PycopterWebApp:
             self.save_plot_download,
             self.save_summary_download,
             self.save_loads_download,
+            self.plot_area_probe,
             sizing_mode="stretch_width",
+            css_classes=["pycopter-toolbar"],
         )
 
-        left = pn.Column(
+        rotor_column = pn.Column(
             self._panel("Rotor Parameters", self._rotor_controls()),
-            width=430,
+            width=INPUT_COLUMN_WIDTH,
+            sizing_mode="stretch_height",
+            scroll=True,
+            css_classes=["pycopter-column"],
         )
-        middle = pn.Column(
+        setup_column = pn.Column(
             self._panel("Calculation Parameters", self._calculation_controls()),
             self._panel("Propulsion Estimation", self._propulsion_controls()),
-            self._panel("Plots", self._plot_controls()),
-            width=430,
+            width=INPUT_COLUMN_WIDTH,
+            sizing_mode="stretch_height",
+            scroll=True,
+            css_classes=["pycopter-column"],
         )
-        right = pn.Column(
+        results_column = pn.Column(
+            self._plot_controls(),
             self.result_tabs,
-            width=700,
+            sizing_mode="stretch_both",
+            css_classes=["pycopter-results"],
         )
-        bottom = pn.Column(
+        log_region = pn.Column(
             self.output_log,
+            height=LOG_HEIGHT,
             sizing_mode="stretch_width",
-            css_classes=["pycopter-panel"],
+            css_classes=["pycopter-panel", "pycopter-log-region"],
         )
 
         return pn.Column(
             toolbar,
-            pn.Row(left, middle, right),
-            bottom,
+            pn.Row(
+                rotor_column,
+                setup_column,
+                results_column,
+                sizing_mode="stretch_both",
+                css_classes=["pycopter-body"],
+            ),
+            log_region,
             css_classes=["pycopter-shell"],
-            width=1570,
+            sizing_mode="stretch_both",
         )
 
     def _build_widgets(self) -> None:
@@ -517,12 +650,18 @@ class PycopterWebApp:
         self.fpa = pn.widgets.FloatInput(label="Flat Plate Area [m2]", value=cfg["fpa"], start=0.0, end=9999.0, step=0.01, width=185)
         self.calc_forward_btn = pn.widgets.Button(label="Calculate Forward Flight", width=390, disabled=True)
 
-        self.plot_select = pn.widgets.Select(label="Selected Plot", options=[], width=400)
-        self.generate_plot_btn = pn.widgets.Button(label="Generate Plot", width=400, disabled=True)
+        self.plot_select = pn.widgets.Select(label="Selected Plot", options=[], sizing_mode="stretch_width")
+        self.generate_plot_btn = pn.widgets.Button(
+            label="Generate Plot",
+            width=150,
+            align="end",
+            disabled=True,
+        )
 
+        self.plot_area_probe = ResultAreaProbe(width=0, height=0, margin=0)
         self.output_log = pn.widgets.Terminal(
             output="",
-            height=150,
+            height=100,
             sizing_mode="stretch_width",
             options={
                 "convertEol": True,
@@ -543,8 +682,7 @@ class PycopterWebApp:
         self.summary_table = pn.widgets.Tabulator(
             pd.DataFrame(columns=["Metric", "Value"]),
             show_index=False,
-            height=RESULT_PANE_HEIGHT,
-            width=690,
+            sizing_mode="stretch_both",
             layout="fit_data_stretch",
             selectable=True,
             editors={"Metric": None, "Value": None},
@@ -554,8 +692,7 @@ class PycopterWebApp:
         self.load_table = pn.widgets.Tabulator(
             pd.DataFrame(),
             show_index=False,
-            height=RESULT_PANE_HEIGHT,
-            width=690,
+            sizing_mode="stretch_both",
             layout="fit_data_table",
             selectable=True,
             configuration=RESULT_TABLE_CONFIGURATION,
@@ -563,15 +700,15 @@ class PycopterWebApp:
         )
         self.load_table_container = pn.Column(
             self.load_table,
-            width=690,
-            height=RESULT_PANE_HEIGHT,
+            sizing_mode="stretch_both",
             css_classes=["pycopter-table-scroll"],
         )
         self.plot_pane = pn.pane.Matplotlib(
             self.plot_fig,
-            height=RESULT_PANE_HEIGHT,
-            width=690,
+            sizing_mode="stretch_both",
             align="start",
+            tight=False,
+            dpi=PLOT_RENDER_DPI,
             css_classes=["pycopter-plot-frame"],
         )
         self.result_tabs = pn.Tabs(
@@ -579,8 +716,7 @@ class PycopterWebApp:
             ("Summary", self.summary_table),
             ("Blade Element Loads", self.load_table_container),
             dynamic=False,
-            height=RESULT_TABS_HEIGHT,
-            width=700,
+            sizing_mode="stretch_both",
         )
 
     def _wire_events(self) -> None:
@@ -598,6 +734,10 @@ class PycopterWebApp:
         self.headspeed_rpm.param.watch(lambda _: self._update_lower_rpm_display(), "value")
         self.lower_rotor_speed_ratio.param.watch(lambda _: self._update_lower_rpm_display(), "value")
         self.geometry_mode.param.watch(lambda _: self._sync_enabled_state(), "value")
+        self.plot_area_probe.param.watch(
+            lambda *_: self._on_plot_area_resized(),
+            ["width_px", "height_px"],
+        )
 
     def _panel(self, title: str, content) -> pn.Column:
         return pn.Column(
@@ -667,6 +807,7 @@ class PycopterWebApp:
                 ("XFOIL Polar Generation", self._xfoil_controls()),
                 ("Coaxial Settings", self._coaxial_controls()),
                 active=[],
+                toggle=True,
                 width=410,
             ),
             width=410,
@@ -689,11 +830,12 @@ class PycopterWebApp:
             width=405,
         )
 
-    def _plot_controls(self) -> pn.Column:
-        return pn.Column(
+    def _plot_controls(self) -> pn.Row:
+        """Plot picker and trigger, shown directly above the result tabs."""
+        return pn.Row(
             self.plot_select,
             self.generate_plot_btn,
-            width=405,
+            sizing_mode="stretch_width",
         )
 
     def _current_config(self) -> dict[str, Any]:
@@ -885,6 +1027,7 @@ class PycopterWebApp:
         self.current_case = None
         self.initialized_rotor = None
         self.plot_fig = self._blank_figure("Initialize rotor, then calculate hover.")
+        self._current_plot_name = ""
         self._plot_save_available = False
         self.plot_pane.object = self.plot_fig
         self._set_read_only_table_value(self.summary_table, pd.DataFrame(columns=["Metric", "Value"]))
@@ -1245,14 +1388,52 @@ class PycopterWebApp:
                 fig = self._plot_forward_powers(self.current_case)
             else:
                 fig = self._blank_figure("No plot selected.")
+            superseded = self.plot_fig
             self.plot_fig = fig
             self.plot_pane.object = fig
+            self._current_plot_name = plot_name
             self._plot_save_available = True
+            if superseded is not fig:
+                plt.close(superseded)
             self.save_plot_download.filename = self._plot_filename(plot_name)
             self.result_tabs.active = 0
             self._sync_enabled_state()
         except Exception as err:
             self._log(f"ERROR - {err}")
+
+    def _figure_size(self) -> tuple[float, float]:
+        """Return the figure size in inches that matches the on-screen plot frame."""
+        if self._plot_area_size_px is None:
+            return PLOT_FIGSIZE
+
+        width_px, height_px = self._plot_area_size_px
+        width_in = min(max(width_px / PLOT_CSS_DPI, PLOT_MIN_SIZE_IN[0]), PLOT_MAX_SIZE_IN[0])
+        height_in = min(max(height_px / PLOT_CSS_DPI, PLOT_MIN_SIZE_IN[1]), PLOT_MAX_SIZE_IN[1])
+        return width_in, height_in
+
+    def _on_plot_area_resized(self) -> None:
+        """Track the browser-reported plot frame size and refresh cheap figures.
+
+        Recomputing a sweep plot means re-running the hover solver many times,
+        so only the placeholder figure is redrawn here. Real plots keep their
+        current raster (CSS keeps them inside the frame) until the next
+        Generate Plot or hover calculation redraws them at the new size.
+        """
+        width_px = int(self.plot_area_probe.width_px)
+        height_px = int(self.plot_area_probe.height_px)
+        if width_px <= 0 or height_px <= 0:
+            return
+
+        previous = self._plot_area_size_px
+        self._plot_area_size_px = (width_px, height_px)
+        if previous is not None and self._plot_save_available:
+            return
+
+        if not self._plot_save_available:
+            superseded = self.plot_fig
+            self.plot_fig = self._blank_figure("Initialize rotor, then calculate hover.")
+            self.plot_pane.object = self.plot_fig
+            plt.close(superseded)
 
     def _plot_filename(self, plot_name: str) -> str:
         slug = "".join(char.lower() if char.isalnum() else "_" for char in plot_name).strip("_")
@@ -1262,7 +1443,7 @@ class PycopterWebApp:
 
     def _plot_blade_geometry(self):
         frame = self.station_table.value.copy()
-        fig, ax1 = plt.subplots(figsize=PLOT_FIGSIZE)
+        fig, ax1 = plt.subplots(figsize=self._figure_size())
         ax1.plot(frame["r_over_R"], frame["chord_m"], marker="o", label="Chord [m]")
         ax1.set_xlabel("r/R")
         ax1.set_ylabel("Chord [m]")
@@ -1289,7 +1470,7 @@ class PycopterWebApp:
             induced = [result.induced_power_W / 1000.0]
             profile = [result.profile_power_W / 1000.0]
         x = np.arange(len(labels))
-        fig, ax = plt.subplots(figsize=PLOT_FIGSIZE)
+        fig, ax = plt.subplots(figsize=self._figure_size())
         ax.bar(x, induced, label="Induced")
         ax.bar(x, profile, bottom=induced, label="Profile")
         ax.set_xticks(x, labels)
@@ -1300,7 +1481,7 @@ class PycopterWebApp:
         return self._finish_plot(fig)
 
     def _plot_radial_loads(self, case: HoverCase):
-        fig, ax = plt.subplots(figsize=PLOT_FIGSIZE)
+        fig, ax = plt.subplots(figsize=self._figure_size())
         for label, hover in self._iter_hover_results(case):
             rows = pd.DataFrame(load_rows_for_result(hover))
             ax.plot(rows["r_over_R"], rows["dT_N"], label=f"{label} dT [N/blade]")
@@ -1313,7 +1494,7 @@ class PycopterWebApp:
         return self._finish_plot(fig)
 
     def _plot_alpha_re_mach(self, case: HoverCase):
-        fig, ax1 = plt.subplots(figsize=PLOT_FIGSIZE)
+        fig, ax1 = plt.subplots(figsize=self._figure_size())
         for label, hover in self._iter_hover_results(case):
             rows = pd.DataFrame(load_rows_for_result(hover))
             ax1.plot(rows["r_over_R"], rows["alpha_deg"], label=f"{label} alpha")
@@ -1331,7 +1512,7 @@ class PycopterWebApp:
         return self._finish_plot(fig)
 
     def _plot_induced_loss(self, case: HoverCase):
-        fig, ax1 = plt.subplots(figsize=PLOT_FIGSIZE)
+        fig, ax1 = plt.subplots(figsize=self._figure_size())
         for label, hover in self._iter_hover_results(case):
             rows = pd.DataFrame(load_rows_for_result(hover))
             ax1.plot(rows["r_over_R"], rows["induced_velocity_m_s"], label=f"{label} vi")
@@ -1348,7 +1529,7 @@ class PycopterWebApp:
         return self._finish_plot(fig)
 
     def _plot_section_coefficients(self, case: HoverCase):
-        fig, ax = plt.subplots(figsize=PLOT_FIGSIZE)
+        fig, ax = plt.subplots(figsize=self._figure_size())
         for label, hover in self._iter_hover_results(case):
             rows = pd.DataFrame(load_rows_for_result(hover))
             ax.plot(rows["r_over_R"], rows["cl"], label=f"{label} Cl")
@@ -1362,7 +1543,7 @@ class PycopterWebApp:
         return self._finish_plot(fig)
 
     def _plot_pitch_moment(self, case: HoverCase):
-        fig, ax = plt.subplots(figsize=PLOT_FIGSIZE)
+        fig, ax = plt.subplots(figsize=self._figure_size())
         for label, hover in self._iter_hover_results(case):
             rows = pd.DataFrame(load_rows_for_result(hover))
             ax.plot(rows["r_over_R"], rows["pitch_moment_Nm"], label=label)
@@ -1375,7 +1556,7 @@ class PycopterWebApp:
         return self._finish_plot(fig)
 
     def _plot_cumulative_loads(self, case: HoverCase):
-        fig, ax1 = plt.subplots(figsize=PLOT_FIGSIZE)
+        fig, ax1 = plt.subplots(figsize=self._figure_size())
         for label, hover in self._iter_hover_results(case):
             rows = pd.DataFrame(load_rows_for_result(hover))
             ax1.plot(rows["r_over_R"], rows["dT_N"].cumsum(), label=f"{label} thrust")
@@ -1395,7 +1576,7 @@ class PycopterWebApp:
         cfg = self._current_config()
         alpha_min = float(cfg["polar_alpha_min_deg"])
         alpha_max = float(cfg["polar_alpha_max_deg"])
-        fig, ax = plt.subplots(figsize=PLOT_FIGSIZE)
+        fig, ax = plt.subplots(figsize=self._figure_size())
         for label, hover in self._iter_hover_results(case):
             rows = pd.DataFrame(load_rows_for_result(hover))
             lower_margin = rows["alpha_deg"] - alpha_min
@@ -1419,7 +1600,7 @@ class PycopterWebApp:
 
     def _plot_geometry_load_contribution(self, case: HoverCase):
         station_frame = self.station_table.value.copy()
-        fig, (ax_geom, ax_loads) = plt.subplots(2, 1, figsize=PLOT_FIGSIZE, sharex=False)
+        fig, (ax_geom, ax_loads) = plt.subplots(2, 1, figsize=self._figure_size(), sharex=False)
         ax_geom.plot(station_frame["r_over_R"], station_frame["chord_m"], marker="o", label="Chord [m]")
         ax_geom.set_ylabel("Chord [m]")
         ax_geom.grid(True)
@@ -1493,7 +1674,7 @@ class PycopterWebApp:
             collectives.append(self._mean_collective_deg(sweep_case))
 
         current_disk_loading = total_hover_thrust_N(case) / max(case.rotor.disk_area_m2, 1e-9)
-        fig, (ax_power, ax_collective) = plt.subplots(2, 1, figsize=PLOT_FIGSIZE, sharex=True)
+        fig, (ax_power, ax_collective) = plt.subplots(2, 1, figsize=self._figure_size(), sharex=True)
         ax_power.plot(disk_loading, shaft_power, marker="o", label="Shaft Power [kW]")
         ax_power.plot(disk_loading, input_power, marker="s", linestyle="--", label=self._input_power_label(base_config))
         ax_power.axvline(current_disk_loading, color=THEME["warning"], linestyle="--", linewidth=1.0, label="Current")
@@ -1541,7 +1722,7 @@ class PycopterWebApp:
             endurance.append(power["endurance"])
             tip_mach.append(self._max_load_value(sweep_case, "mach"))
 
-        fig, (ax_power, ax_endurance) = plt.subplots(2, 1, figsize=PLOT_FIGSIZE, sharex=True)
+        fig, (ax_power, ax_endurance) = plt.subplots(2, 1, figsize=self._figure_size(), sharex=True)
         ax_power.plot(diameters_valid, shaft_power, marker="o", label="Shaft Power [kW]")
         ax_power.axvline(diameter, color=THEME["warning"], linestyle="--", linewidth=1.0, label="Current Diameter")
         ax_power.set_ylabel("Shaft Power [kW]")
@@ -1591,7 +1772,7 @@ class PycopterWebApp:
             for label, hover in self._iter_hover_results(sweep_case):
                 collective_by_label.setdefault(label, []).append(hover.collective_pitch_deg)
 
-        fig, axes = plt.subplots(2, 2, figsize=PLOT_FIGSIZE, sharex=True)
+        fig, axes = plt.subplots(2, 2, figsize=self._figure_size(), sharex=True)
         ax_power, ax_collective, ax_mach, ax_re = axes.flatten()
         ax_power.plot(rpms_valid, shaft_power, marker="o", label="Shaft Power [kW]")
         ax_power.axvline(rpm, color=THEME["warning"], linestyle="--", linewidth=1.0)
@@ -1661,7 +1842,7 @@ class PycopterWebApp:
         yaw_torque = [self._net_aircraft_yaw_torque(item[1]) for item in valid]
         shaft_power = [total_hover_power_W(item[1]) / 1000.0 for item in valid]
 
-        fig, (ax_thrust, ax_torque) = plt.subplots(2, 1, figsize=PLOT_FIGSIZE, sharex=True)
+        fig, (ax_thrust, ax_torque) = plt.subplots(2, 1, figsize=self._figure_size(), sharex=True)
         ax_thrust.plot(x, thrust, marker="o", label="Total Thrust [N]")
         ax_power = ax_thrust.twinx()
         ax_power.plot(x, shaft_power, marker="s", linestyle="--", color="tab:green", label="Shaft Power [kW]")
@@ -1686,7 +1867,7 @@ class PycopterWebApp:
     def _plot_energy_capacity_endurance(self, case: HoverCase):
         cfg = self._current_config()
         shaft_power_W = total_hover_power_W(case)
-        fig, ax = plt.subplots(figsize=PLOT_FIGSIZE)
+        fig, ax = plt.subplots(figsize=self._figure_size())
         if cfg["propulsion_model"] == "electric":
             current_capacity = float(cfg["battery_capacity_Wh"])
             capacities = np.linspace(max(1.0, 0.25 * current_capacity), max(1.0, 2.0 * current_capacity), DESIGN_SWEEP_POINTS)
@@ -1721,7 +1902,7 @@ class PycopterWebApp:
     def _plot_efficiency_loss_sensitivity(self, case: HoverCase):
         cfg = self._current_config()
         shaft_power_W = total_hover_power_W(case)
-        fig, ax = plt.subplots(figsize=PLOT_FIGSIZE)
+        fig, ax = plt.subplots(figsize=self._figure_size())
         if cfg["propulsion_model"] == "electric":
             motor_values = np.linspace(0.60, 0.98, 25)
             loss_values = np.linspace(0.0, 0.30, 25)
@@ -1813,7 +1994,7 @@ class PycopterWebApp:
             for label, hover in self._iter_hover_results(sweep_case):
                 collectives_by_label.setdefault(label, []).append(hover.collective_pitch_deg)
 
-        fig, (ax_endurance, ax_collective) = plt.subplots(2, 1, figsize=PLOT_FIGSIZE, sharex=True)
+        fig, (ax_endurance, ax_collective) = plt.subplots(2, 1, figsize=self._figure_size(), sharex=True)
         ax_endurance.plot(payload_delta, endurance, marker="o", color="tab:green", label=self._endurance_label(base_config))
         ax_endurance.axvline(0.0, color=THEME["warning"], linestyle="--", linewidth=1.0, label="Current Gross Mass")
         ax_endurance.set_ylabel(self._endurance_label(base_config))
@@ -1842,7 +2023,7 @@ class PycopterWebApp:
             result.total_power_W / 1000.0,
             result.interference_power_delta_W / 1000.0,
         ]
-        fig, ax = plt.subplots(figsize=PLOT_FIGSIZE)
+        fig, ax = plt.subplots(figsize=self._figure_size())
         ax.bar(labels, values, color=["tab:blue", "tab:orange", "tab:red"])
         ax.set_ylabel("Power [kW]")
         ax.set_title("Coaxial Interference Power")
@@ -1882,7 +2063,7 @@ class PycopterWebApp:
             yaw_torques.append(result.net_aircraft_yaw_torque_Nm)
 
         current_spacing = float(base_config["coaxial_spacing_ratio"])
-        fig, ax = plt.subplots(figsize=PLOT_FIGSIZE)
+        fig, ax = plt.subplots(figsize=self._figure_size())
         ax.plot(spacings, losses, marker="o", label="Interference Loss")
         ax.axvline(current_spacing, color=THEME["warning"], linestyle="--", linewidth=1.1, label="Current z/R")
         ax.set_title("Coaxial Spacing Sweep")
@@ -1956,7 +2137,7 @@ class PycopterWebApp:
         total_thrust = [item[1].total_thrust_N for item in valid]
         yaw_input_values = [item[0] for item in valid]
 
-        fig, (ax_yaw, ax_thrust) = plt.subplots(2, 1, figsize=PLOT_FIGSIZE, sharex=True)
+        fig, (ax_yaw, ax_thrust) = plt.subplots(2, 1, figsize=self._figure_size(), sharex=True)
         scatter = ax_yaw.scatter(
             thrust_share,
             yaw_torque,
@@ -1992,7 +2173,7 @@ class PycopterWebApp:
         cfg = self._current_config()
         estimates = velocity_sweep(case.rotor, hover, density_kg_m3=float(cfg["density"]), flat_plate_area_m2=float(cfg["fpa"]))
         velocities = [estimate.velocity_m_s * 3.6 for estimate in estimates]
-        fig, ax = plt.subplots(figsize=PLOT_FIGSIZE)
+        fig, ax = plt.subplots(figsize=self._figure_size())
         ax.plot(velocities, [estimate.induced_power_W * 0.00134102209 for estimate in estimates], label="Induced")
         ax.plot(velocities, [estimate.profile_power_W * 0.00134102209 for estimate in estimates], label="Profile")
         ax.plot(velocities, [estimate.parasite_power_W * 0.00134102209 for estimate in estimates], label="Parasite")
@@ -2010,7 +2191,7 @@ class PycopterWebApp:
         hover = primary_hover_result(case)
         estimates = velocity_sweep(case.rotor, hover, density_kg_m3=float(cfg["density"]), flat_plate_area_m2=float(cfg["fpa"]))
         velocities, endurance, flight_range = electric_range_sweep(estimates, cfg)
-        fig, ax1 = plt.subplots(figsize=PLOT_FIGSIZE)
+        fig, ax1 = plt.subplots(figsize=self._figure_size())
         ax1.plot(velocities, endurance, label="Endurance")
         ax1.set_xlabel("Velocity [km/hr]")
         ax1.set_ylabel("Endurance [hr]")
@@ -2028,7 +2209,7 @@ class PycopterWebApp:
         hover = primary_hover_result(case)
         estimates = velocity_sweep(case.rotor, hover, density_kg_m3=float(cfg["density"]), flat_plate_area_m2=float(cfg["fpa"]))
         velocities, endurance, flight_range = fossil_range_sweep(estimates, hover, cfg)
-        fig, ax1 = plt.subplots(figsize=PLOT_FIGSIZE)
+        fig, ax1 = plt.subplots(figsize=self._figure_size())
         ax1.plot(velocities, endurance, color="tab:red", label="Endurance")
         ax1.set_xlabel("Free Stream Velocity [km/hr]")
         ax1.set_ylabel("Endurance [hr]")
@@ -2174,7 +2355,7 @@ class PycopterWebApp:
             raise ValueError("Legacy forward-flight plots are available for single-rotor cases only.")
 
     def _blank_figure(self, text: str):
-        fig, ax = plt.subplots(figsize=PLOT_FIGSIZE)
+        fig, ax = plt.subplots(figsize=self._figure_size())
         ax.text(0.5, 0.5, text, ha="center", va="center", color=THEME["muted"])
         ax.set_axis_off()
         return self._finish_plot(fig)
