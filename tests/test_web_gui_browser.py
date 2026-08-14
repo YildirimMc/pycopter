@@ -33,6 +33,7 @@ DEEP_MEASURE_JS = """
     };
     const root = document.documentElement;
     const frames = pick('.pycopter-plot-frame');
+    const terminals = all.filter(el => String(el.className) === 'terminal xterm');
     return {
         pageOverflowX: root.scrollWidth - root.clientWidth,
         pageOverflowY: root.scrollHeight - root.clientHeight,
@@ -40,7 +41,27 @@ DEEP_MEASURE_JS = """
         shell: pick('.pycopter-shell').map(size),
         columns: pick('.pycopter-column').map(size),
         plotFrame: frames.map(size),
+        logRegion: pick('.pycopter-log-region').map(size),
+        terminalHeight: terminals.length ? terminals[0].offsetHeight : 0,
     };
+}
+"""
+
+# Centre of the log resize grip, in page coordinates.
+GRIP_CENTRE_JS = """
+() => {
+    function deepAll(root, acc) {
+        root.querySelectorAll('*').forEach(el => {
+            acc.push(el);
+            if (el.shadowRoot) { deepAll(el.shadowRoot, acc); }
+        });
+        return acc;
+    }
+    const grip = deepAll(document, []).find(
+        el => el.classList && el.classList.contains('pycopter-log-grip'));
+    if (!grip) { return null; }
+    const box = grip.getBoundingClientRect();
+    return {x: box.left + box.width / 2, y: box.top + box.height / 2};
 }
 """
 
@@ -207,6 +228,88 @@ class TestWebGuiBrowserRender(unittest.TestCase):
         large_frame = measurements[(2560, 1329)][0]["plotFrame"][0]
         self.assertGreater(large_frame["width"], small_frame["width"])
         self.assertGreater(large_frame["height"], small_frame["height"])
+
+    def test_output_log_drags_upwards_and_compresses_the_plot(self):
+        """The log grows upward on drag, taking height from the result area.
+
+        Its starting height is the minimum, so dragging down cannot shrink it
+        further, and the terminal must re-flow rather than leave a tall empty
+        box with a short xterm inside it.
+        """
+        try:
+            import panel as pn
+            from playwright.sync_api import Error as PlaywrightError
+            from playwright.sync_api import sync_playwright
+        except ImportError as err:
+            self.skipTest(f"Browser render dependencies are unavailable: {err}")
+
+        port = _free_port()
+        server = pn.serve(
+            {"/dashboard": create_app},
+            address="127.0.0.1",
+            port=port,
+            websocket_origin=_websocket_origins(port),
+            show=False,
+            threaded=True,
+            verbose=False,
+            title="pycopter log splitter test",
+        )
+
+        try:
+            with sync_playwright() as playwright:
+                try:
+                    browser = playwright.chromium.launch(headless=True)
+                except PlaywrightError as err:
+                    self.skipTest(f"Playwright Chromium is unavailable: {err}")
+
+                page = browser.new_page(viewport={"width": 1920, "height": 937})
+                page.goto(
+                    f"http://127.0.0.1:{port}/dashboard",
+                    wait_until="networkidle",
+                    timeout=30000,
+                )
+                page.wait_for_timeout(1500)
+
+                def drag(offset_y):
+                    grip = page.evaluate(GRIP_CENTRE_JS)
+                    self.assertIsNotNone(grip, "log resize grip is missing")
+                    page.mouse.move(grip["x"], grip["y"])
+                    page.mouse.down()
+                    page.mouse.move(grip["x"], grip["y"] + offset_y, steps=8)
+                    page.mouse.up()
+                    page.wait_for_timeout(600)
+
+                start = page.evaluate(DEEP_MEASURE_JS)
+                drag(-260)
+                expanded = page.evaluate(DEEP_MEASURE_JS)
+                drag(400)
+                clamped = page.evaluate(DEEP_MEASURE_JS)
+                browser.close()
+        finally:
+            stop = getattr(server, "stop", None)
+            if stop is not None:
+                stop()
+
+        start_log = start["logRegion"][0]["height"]
+        expanded_log = expanded["logRegion"][0]["height"]
+        clamped_log = clamped["logRegion"][0]["height"]
+
+        # Dragging up grows the log and takes that height from the plot.
+        self.assertGreater(expanded_log, start_log + 200)
+        self.assertLess(
+            expanded["plotFrame"][0]["height"],
+            start["plotFrame"][0]["height"] - 200,
+        )
+        # The terminal itself must grow, not just the panel around it.
+        self.assertGreater(expanded["terminalHeight"], start["terminalHeight"] + 200)
+
+        # The starting size is the minimum, so dragging down cannot go below it.
+        self.assertEqual(clamped_log, start_log)
+        self.assertEqual(clamped["plotFrame"][0]["height"], start["plotFrame"][0]["height"])
+
+        for label, measured in (("start", start), ("expanded", expanded), ("clamped", clamped)):
+            self.assertEqual(measured["pageOverflowY"], 0, f"{label} scrolls the page vertically")
+            self.assertEqual(measured["pageOverflowX"], 0, f"{label} scrolls the page horizontally")
 
 
 if __name__ == "__main__":

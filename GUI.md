@@ -241,6 +241,15 @@ All coaxial outputs are on `CoaxialHoverResult`.
 - Each input column scrolls internally. Opening `Background Solver Settings`,
   `XFOIL Polar Generation`, or `Coaxial Settings` must not change the page
   height, the result area size, or the position of any other region.
+- The output log sits under a drag grip and can be pulled upwards, taking its
+  extra height from the result area. Its start height is also its minimum, and
+  it cannot grow past the point where the result area would fall below
+  `RESULT_MIN_HEIGHT`. Double-clicking the grip restores the minimum.
+- Dragging updates inline heights so the layout reflows every frame, and
+  commits the final height to Python on release. The terminal is refitted
+  explicitly through the Panel terminal view, because Bokeh does not run a
+  layout pass for a plain height change and xterm would otherwise keep its old
+  row count inside a taller box.
 - Input columns are fixed at `INPUT_COLUMN_WIDTH` because they hold fixed-width
   form controls. The result area takes all remaining width, so a larger monitor
   yields a larger plot rather than empty margin. Below roughly 1420 px of
@@ -254,6 +263,26 @@ All coaxial outputs are on `CoaxialHoverResult`.
 - Window resizing does not regenerate sweep plots, because each one re-runs the
   hover solver many times. The existing image is kept inside the frame by CSS
   until the next `Generate Plot` or hover calculation redraws it.
+
+## Plot Axis Rules
+
+- Quantities with different units or magnitudes get their own y-axis. A series
+  squashed onto another series' scale reads as a flat line at zero and hides
+  real information: element torque is about 3% of element thrust, Cd and Cm are
+  a few percent of Cl, and Mach is around 1e-6 of Reynolds.
+- `PycopterWebApp._plot_element_series` is the shared entry point for
+  per-element plots against `r/R`. It assigns one accent-coloured axis per
+  quantity, offsetting the third axis outward so its spine clears the second.
+- Colour identifies the quantity and line style identifies the rotor, so a
+  coaxial case keeps the same colour coding as a single rotor. Per-quantity
+  markers are staggered along the span so curves that trace the same shape,
+  such as Reynolds and Mach, stay distinguishable where they overlap.
+- Twin axes are created through `_twin_axis` so `_finish_plot` can colour the
+  matching spine, ticks, and label, and skip the duplicate grid. A single
+  combined legend covers every axis in the figure.
+- Series that share a unit stay on one axis. `Forward Flight Powers vs
+  Velocity` deliberately keeps induced, profile, parasite, and total power
+  together because their relative size is the point of the plot.
 
 ## XFOIL Cache And Parallelism
 

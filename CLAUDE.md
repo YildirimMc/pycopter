@@ -72,7 +72,9 @@
 - Matplotlib figures are drawn at the size the plot frame actually has on screen. `ResultAreaProbe` measures it in the browser and syncs it back, because Panel does not report pane size to the server. Use `self._figure_size()` for every new figure, never a hardcoded `figsize`.
 - Resizing the window does not re-run sweep plots, since those re-run the solver many times. CSS keeps the existing raster inside the frame until the next Generate Plot.
 - Panel renders each component into its own shadow root, so browser-side helpers must walk shadow roots; a plain `document.querySelector` will not find dashboard elements.
-- `tests/test_web_gui_browser.py` locks this in at 1920x937, 2560x1329, and 1366x728, collapsed and expanded. Run it after any layout change.
+- The output log is resizable upwards against the result area via `LogSplitter`. Its start height is its minimum. Bokeh does not run a layout pass for a plain height change, so the terminal must be refitted explicitly through the Panel terminal view or xterm keeps its old row count inside a taller box.
+- Plot quantities with different units or magnitudes must each get their own y-axis; route per-element plots through `_plot_element_series` and create twins with `_twin_axis` so `_finish_plot` can colour and de-duplicate them. Series sharing a unit stay on one axis.
+- `tests/test_web_gui_browser.py` locks this in at 1920x937, 2560x1329, and 1366x728, collapsed and expanded, plus a real drag of the log splitter. Run it after any layout change.
 
 ## Conventions
 - Most commit messages are short imperative or descriptive summaries.

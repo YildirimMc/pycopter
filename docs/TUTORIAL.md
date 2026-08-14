@@ -38,6 +38,11 @@ The window has four regions:
 Each column scrolls on its own, so opening a collapsible section never moves
 anything else. The plot area grows to fill whatever space your monitor has.
 
+**Resizing the run log.** Drag the horizontal grip just above the log to pull
+it upwards when you want to read more output; the plot area gives up the space.
+Its starting height is the minimum, so it only grows from there, and
+double-clicking the grip snaps it back.
+
 ---
 
 ## 2. Defining a rotor
@@ -147,6 +152,14 @@ region — widen the alpha range and regenerate rather than ignoring it.
 
 Whatever you last generated. The figure is drawn at the size of your plot area,
 so it stays legible on any monitor.
+
+**Reading multi-axis plots.** Where a plot shows quantities of different units
+or very different magnitudes, each one gets its own y-axis, colour-matched to
+its curve — element torque is only a few percent of element thrust, and Mach is
+a millionth of Reynolds, so a shared scale would flatten one to a line at zero.
+Colour tells you which quantity a curve is; line style tells you which rotor
+(solid upper, dashed lower). Curves that trace the same shape carry staggered
+markers so you can still separate them where they overlap.
 
 ### Summary tab
 

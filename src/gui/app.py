@@ -52,7 +52,15 @@ from .calculations import (
 # Wide enough for the 410 px control stack plus panel padding and the column
 # scrollbar, so a scrolling input column never clips its own widgets.
 INPUT_COLUMN_WIDTH = 448
+# The output log starts at its minimum height and can be dragged upwards, which
+# takes room from the result area rather than from the page.
 LOG_HEIGHT = 132
+LOG_MIN_HEIGHT = 132
+LOG_GRIP_HEIGHT = 9
+# Padding between the log region box and the terminal widget inside it.
+LOG_TERMINAL_INSET = 32
+# The result area never shrinks below this, so dragging cannot hide the plot.
+RESULT_MIN_HEIGHT = 300
 # Figure inches are derived from CSS pixels at the 96 dpi CSS reference, while
 # the pane rasterizes at PLOT_RENDER_DPI. The 1.5x ratio supersamples the PNG so
 # it stays sharp on high-density displays while axis text keeps its true size.
@@ -74,6 +82,16 @@ COAXIAL_SPACING_SWEEP_MAX = 1.50
 DESIGN_SWEEP_POINTS = 17
 CONTROL_SWEEP_POINTS = 31
 MIN_SWEEP_GROSS_MASS_KG = 0.05
+# Outward offset in points for a third y-axis, so its spine clears the second.
+AXIS_OFFSET_POINTS = 58
+# One colour per plotted quantity. Rotors are separated by line style instead,
+# so a quantity keeps its colour whether the case is single or coaxial.
+SERIES_COLORS = ("#4db6ac", "#e08a4f", "#9d8df1", "#77b6ea")
+# Sparse per-quantity markers keep curves apart when their shapes coincide.
+# Reynolds and Mach, for example, are both linear in radius, so on separate
+# axes they plot as the same line and colour alone would not separate them.
+SERIES_MARKERS = ("o", "s", "^", "D")
+SERIES_MARKER_COUNT = 9
 THEME = {
     "page": "#111315",
     "panel": "#1b1d20",
@@ -137,6 +155,34 @@ body {
 .pycopter-log-region {
     flex: 0 0 auto;
 }
+/* Drag handle that grows the output log upwards into the result area. */
+.pycopter-log-grip {
+    flex: 0 0 auto;
+    height: 9px;
+    cursor: ns-resize;
+    background: #1b1d20;
+    border-top: 1px solid #3a4048;
+    border-bottom: 1px solid #3a4048;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    touch-action: none;
+    user-select: none;
+}
+.pycopter-log-grip::after {
+    content: "";
+    width: 54px;
+    height: 3px;
+    border-radius: 2px;
+    background: #59616b;
+}
+.pycopter-log-grip:hover::after,
+.pycopter-log-grip.pycopter-grip-active::after {
+    background: #4db6ac;
+}
+.pycopter-log-grip.pycopter-grip-active {
+    background: #23262b;
+}
 .pycopter-panel {
     border: 1px solid #3a4048;
     background: #1b1d20;
@@ -152,10 +198,10 @@ body {
     font-weight: 600;
 }
 .pycopter-log {
-    height: 100px;
+    height: 100%;
 }
 .pycopter-log .xterm {
-    height: 100px !important;
+    height: 100% !important;
     font-family: Consolas, "Courier New", monospace;
     font-size: 12px;
     background: #121416;
@@ -411,6 +457,163 @@ class ResultAreaProbe(pn.reactive.ReactiveHTML):
     }
 
 
+class LogSplitter(pn.reactive.ReactiveHTML):
+    """Drag handle that resizes the output log against the result area.
+
+    Dragging updates the log element's inline height directly so the flex
+    layout reflows every frame, and commits the final height to Python on
+    release. The commit matters because the terminal only re-flows its rows
+    when Panel resizes the widget itself.
+    """
+
+    height_px = param.Integer(default=LOG_HEIGHT)
+
+    _template = (
+        '<div id="grip" class="pycopter-log-grip"'
+        ' title="Drag to resize the output log. Double-click to reset."></div>'
+    )
+    _scripts = {
+        "render": """
+            const MIN_HEIGHT = %(min_height)d;
+            const RESULT_MIN = %(result_min)d;
+            const GRIP_HEIGHT = %(grip_height)d;
+            const TERMINAL_INSET = %(terminal_inset)d;
+
+            // Panel renders each component into its own shadow root, so these
+            // elements cannot be reached with a plain document.querySelector.
+            function findDeep(selector, root) {
+                for (const el of (root || document).querySelectorAll('*')) {
+                    if (el.matches && el.matches(selector)) { return el; }
+                    if (el.shadowRoot) {
+                        const found = findDeep(selector, el.shadowRoot);
+                        if (found) { return found; }
+                    }
+                }
+                return null;
+            }
+
+            // xterm only re-flows its rows when the Panel view refits it, and
+            // Bokeh does not run a layout pass for a plain height change.
+            let terminalView = null;
+            function findTerminalView(view, depth) {
+                if (!view || depth > 12) { return null; }
+                if (view.constructor && view.constructor.__name__ === 'TerminalView') { return view; }
+                for (const child of (view.child_views || [])) {
+                    const found = findTerminalView(child, depth + 1);
+                    if (found) { return found; }
+                }
+                return null;
+            }
+            function refitTerminal() {
+                try {
+                    if (!terminalView) {
+                        const roots = (window.Bokeh && window.Bokeh.index) || {};
+                        for (const root of Object.values(roots)) {
+                            terminalView = findTerminalView(root, 0);
+                            if (terminalView) { break; }
+                        }
+                    }
+                    if (terminalView && typeof terminalView.fit === 'function') {
+                        terminalView.fit();
+                    }
+                } catch (err) {
+                    // Leave the log at its current row count rather than break the drag.
+                }
+            }
+
+            function applyHeight(height) {
+                const region = findDeep('.pycopter-log-region');
+                if (region) { region.style.height = height + 'px'; }
+                // Resize the terminal box too, so the rows follow the drag
+                // instead of snapping only once Python commits the height.
+                const inner = height - TERMINAL_INSET;
+                const host = findDeep('.pycopter-log');
+                if (host) { host.style.height = inner + 'px'; }
+                const container = findDeep('.terminal-container');
+                if (container) { container.style.height = inner + 'px'; }
+            }
+
+            function maxHeight() {
+                return Math.max(MIN_HEIGHT, window.innerHeight - RESULT_MIN - GRIP_HEIGHT);
+            }
+            function clamp(value) {
+                return Math.round(Math.min(Math.max(value, MIN_HEIGHT), maxHeight()));
+            }
+
+            let dragging = false;
+            let startY = 0;
+            let startHeight = MIN_HEIGHT;
+            let liveHeight = MIN_HEIGHT;
+            let refitQueued = false;
+            function queueRefit() {
+                if (refitQueued) { return; }
+                refitQueued = true;
+                window.requestAnimationFrame(() => {
+                    refitQueued = false;
+                    refitTerminal();
+                });
+            }
+
+            grip.addEventListener('pointerdown', (event) => {
+                const region = findDeep('.pycopter-log-region');
+                if (!region) { return; }
+                dragging = true;
+                startY = event.clientY;
+                startHeight = region.getBoundingClientRect().height;
+                liveHeight = startHeight;
+                grip.classList.add('pycopter-grip-active');
+                grip.setPointerCapture(event.pointerId);
+                event.preventDefault();
+            });
+
+            grip.addEventListener('pointermove', (event) => {
+                if (!dragging) { return; }
+                // Dragging up (a smaller clientY) makes the log taller.
+                liveHeight = clamp(startHeight + (startY - event.clientY));
+                applyHeight(liveHeight);
+                queueRefit();
+                event.preventDefault();
+            });
+
+            function endDrag(event) {
+                if (!dragging) { return; }
+                dragging = false;
+                grip.classList.remove('pycopter-grip-active');
+                if (event && event.pointerId !== undefined && grip.hasPointerCapture(event.pointerId)) {
+                    grip.releasePointerCapture(event.pointerId);
+                }
+                if (liveHeight !== data.height_px) { data.height_px = liveHeight; }
+                refitTerminal();
+            }
+            grip.addEventListener('pointerup', endDrag);
+            grip.addEventListener('pointercancel', endDrag);
+
+            grip.addEventListener('dblclick', () => {
+                liveHeight = MIN_HEIGHT;
+                applyHeight(MIN_HEIGHT);
+                if (data.height_px !== MIN_HEIGHT) { data.height_px = MIN_HEIGHT; }
+                refitTerminal();
+            });
+
+            // Shrinking the window must not leave the log taller than allowed.
+            window.addEventListener('resize', () => {
+                const region = findDeep('.pycopter-log-region');
+                if (!region || dragging) { return; }
+                const corrected = clamp(region.getBoundingClientRect().height);
+                applyHeight(corrected);
+                if (corrected !== data.height_px) { data.height_px = corrected; }
+                queueRefit();
+            });
+        """
+        % {
+            "min_height": LOG_MIN_HEIGHT,
+            "result_min": RESULT_MIN_HEIGHT,
+            "grip_height": LOG_GRIP_HEIGHT,
+            "terminal_inset": LOG_TERMINAL_INSET,
+        }
+    }
+
+
 class PycopterWebApp:
     """Stateful Panel application."""
 
@@ -467,13 +670,6 @@ class PycopterWebApp:
             sizing_mode="stretch_both",
             css_classes=["pycopter-results"],
         )
-        log_region = pn.Column(
-            self.output_log,
-            height=LOG_HEIGHT,
-            sizing_mode="stretch_width",
-            css_classes=["pycopter-panel", "pycopter-log-region"],
-        )
-
         return pn.Column(
             toolbar,
             pn.Row(
@@ -483,7 +679,8 @@ class PycopterWebApp:
                 sizing_mode="stretch_both",
                 css_classes=["pycopter-body"],
             ),
-            log_region,
+            self.log_splitter,
+            self.log_region,
             css_classes=["pycopter-shell"],
             sizing_mode="stretch_both",
         )
@@ -659,9 +856,14 @@ class PycopterWebApp:
         )
 
         self.plot_area_probe = ResultAreaProbe(width=0, height=0, margin=0)
+        self.log_splitter = LogSplitter(
+            height=LOG_GRIP_HEIGHT,
+            sizing_mode="stretch_width",
+            margin=0,
+        )
         self.output_log = pn.widgets.Terminal(
             output="",
-            height=100,
+            height=LOG_HEIGHT - LOG_TERMINAL_INSET,
             sizing_mode="stretch_width",
             options={
                 "convertEol": True,
@@ -678,6 +880,12 @@ class PycopterWebApp:
                 },
             },
             css_classes=["pycopter-log"],
+        )
+        self.log_region = pn.Column(
+            self.output_log,
+            height=LOG_HEIGHT,
+            sizing_mode="stretch_width",
+            css_classes=["pycopter-panel", "pycopter-log-region"],
         )
         self.summary_table = pn.widgets.Tabulator(
             pd.DataFrame(columns=["Metric", "Value"]),
@@ -738,6 +946,7 @@ class PycopterWebApp:
             lambda *_: self._on_plot_area_resized(),
             ["width_px", "height_px"],
         )
+        self.log_splitter.param.watch(lambda *_: self._on_log_resized(), "height_px")
 
     def _panel(self, title: str, content) -> pn.Column:
         return pn.Column(
@@ -1435,6 +1644,16 @@ class PycopterWebApp:
             self.plot_pane.object = self.plot_fig
             plt.close(superseded)
 
+    def _on_log_resized(self) -> None:
+        """Commit a dragged log height so the terminal re-flows its rows.
+
+        The drag itself only changes inline CSS, which reflows the layout but
+        leaves the terminal rendering at its old row count.
+        """
+        height = max(LOG_MIN_HEIGHT, int(self.log_splitter.height_px))
+        self.log_region.height = height
+        self.output_log.height = max(40, height - LOG_TERMINAL_INSET)
+
     def _plot_filename(self, plot_name: str) -> str:
         slug = "".join(char.lower() if char.isalnum() else "_" for char in plot_name).strip("_")
         while "__" in slug:
@@ -1444,15 +1663,16 @@ class PycopterWebApp:
     def _plot_blade_geometry(self):
         frame = self.station_table.value.copy()
         fig, ax1 = plt.subplots(figsize=self._figure_size())
-        ax1.plot(frame["r_over_R"], frame["chord_m"], marker="o", label="Chord [m]")
+        self._accent_axis(ax1, SERIES_COLORS[0])
+        ax1.plot(frame["r_over_R"], frame["chord_m"], marker="o", color=SERIES_COLORS[0], label="Chord [m]")
         ax1.set_xlabel("r/R")
         ax1.set_ylabel("Chord [m]")
         ax1.grid(True)
-        ax2 = ax1.twinx()
-        ax2.plot(frame["r_over_R"], frame["twist_deg"], marker="s", color="tab:red", label="Twist [deg]")
+        ax2 = self._twin_axis(ax1, SERIES_COLORS[1])
+        ax2.plot(frame["r_over_R"], frame["twist_deg"], marker="s", color=SERIES_COLORS[1], label="Twist [deg]")
         ax2.set_ylabel("Twist [deg]")
-        fig.suptitle("Blade Geometry")
-        fig.legend(loc="upper right")
+        ax1.set_title("Blade Geometry")
+        self._combined_legend(ax1, ax2)
         return self._finish_plot(fig)
 
     def _plot_power_breakdown(self, case: HoverCase):
@@ -1481,66 +1701,52 @@ class PycopterWebApp:
         return self._finish_plot(fig)
 
     def _plot_radial_loads(self, case: HoverCase):
-        fig, ax = plt.subplots(figsize=self._figure_size())
-        for label, hover in self._iter_hover_results(case):
-            rows = pd.DataFrame(load_rows_for_result(hover))
-            ax.plot(rows["r_over_R"], rows["dT_N"], label=f"{label} dT [N/blade]")
-            ax.plot(rows["r_over_R"], rows["dQ_Nm"], linestyle="--", label=f"{label} dQ [Nm/blade]")
-        ax.set_title("Per-Blade Radial Loads")
-        ax.set_xlabel("r/R")
-        ax.set_ylabel("Element Load [N/blade, Nm/blade]")
-        ax.grid(True)
-        ax.legend()
-        return self._finish_plot(fig)
+        # Element torque is roughly 3% of element thrust, so a shared y-axis
+        # renders the torque curve as a flat line along zero.
+        return self._plot_element_series(
+            case,
+            (
+                ("dT_N", "Element Thrust [N/blade]", "dT [N/blade]"),
+                ("dQ_Nm", "Element Torque [Nm/blade]", "dQ [Nm/blade]"),
+            ),
+            "Per-Blade Radial Loads",
+        )
 
     def _plot_alpha_re_mach(self, case: HoverCase):
-        fig, ax1 = plt.subplots(figsize=self._figure_size())
-        for label, hover in self._iter_hover_results(case):
-            rows = pd.DataFrame(load_rows_for_result(hover))
-            ax1.plot(rows["r_over_R"], rows["alpha_deg"], label=f"{label} alpha")
-        ax1.set_xlabel("r/R")
-        ax1.set_ylabel("Alpha [deg]")
-        ax1.grid(True)
-        ax2 = ax1.twinx()
-        for label, hover in self._iter_hover_results(case):
-            rows = pd.DataFrame(load_rows_for_result(hover))
-            ax2.plot(rows["r_over_R"], rows["reynolds"], linestyle="--", label=f"{label} Re")
-            ax2.plot(rows["r_over_R"], rows["mach"], linestyle=":", label=f"{label} Mach")
-        ax2.set_ylabel("Reynolds / Mach")
-        fig.suptitle("Section Flow Conditions")
-        fig.legend(loc="upper right")
-        return self._finish_plot(fig)
+        # Mach is around 1e-6 of Reynolds, so these three quantities need three
+        # separate axes rather than Reynolds and Mach sharing one.
+        return self._plot_element_series(
+            case,
+            (
+                ("alpha_deg", "Alpha [deg]", "alpha [deg]"),
+                ("reynolds", "Reynolds [-]", "Re [-]"),
+                ("mach", "Mach [-]", "Mach [-]"),
+            ),
+            "Section Flow Conditions",
+        )
 
     def _plot_induced_loss(self, case: HoverCase):
-        fig, ax1 = plt.subplots(figsize=self._figure_size())
-        for label, hover in self._iter_hover_results(case):
-            rows = pd.DataFrame(load_rows_for_result(hover))
-            ax1.plot(rows["r_over_R"], rows["induced_velocity_m_s"], label=f"{label} vi")
-        ax1.set_xlabel("r/R")
-        ax1.set_ylabel("Induced Velocity [m/s]")
-        ax1.grid(True)
-        ax2 = ax1.twinx()
-        for label, hover in self._iter_hover_results(case):
-            rows = pd.DataFrame(load_rows_for_result(hover))
-            ax2.plot(rows["r_over_R"], rows["loss_factor"], linestyle="--", label=f"{label} loss")
-        ax2.set_ylabel("Loss Factor")
-        fig.suptitle("Induced Velocity and Root/Tip Loss")
-        fig.legend(loc="upper right")
-        return self._finish_plot(fig)
+        return self._plot_element_series(
+            case,
+            (
+                ("induced_velocity_m_s", "Induced Velocity [m/s]", "vi [m/s]"),
+                ("loss_factor", "Loss Factor [-]", "loss factor [-]"),
+            ),
+            "Induced Velocity and Root/Tip Loss",
+        )
 
     def _plot_section_coefficients(self, case: HoverCase):
-        fig, ax = plt.subplots(figsize=self._figure_size())
-        for label, hover in self._iter_hover_results(case):
-            rows = pd.DataFrame(load_rows_for_result(hover))
-            ax.plot(rows["r_over_R"], rows["cl"], label=f"{label} Cl")
-            ax.plot(rows["r_over_R"], rows["cd"], linestyle="--", label=f"{label} Cd")
-            ax.plot(rows["r_over_R"], rows["cm"], linestyle=":", label=f"{label} Cm")
-        ax.set_title("Section Coefficients")
-        ax.set_xlabel("r/R")
-        ax.set_ylabel("Coefficient")
-        ax.grid(True)
-        ax.legend()
-        return self._finish_plot(fig)
+        # Cd and Cm are a few percent of Cl, so one shared coefficient axis
+        # hides both of them along the zero line.
+        return self._plot_element_series(
+            case,
+            (
+                ("cl", "Cl [-]", "Cl [-]"),
+                ("cd", "Cd [-]", "Cd [-]"),
+                ("cm", "Cm [-]", "Cm [-]"),
+            ),
+            "Section Coefficients",
+        )
 
     def _plot_pitch_moment(self, case: HoverCase):
         fig, ax = plt.subplots(figsize=self._figure_size())
@@ -1556,21 +1762,14 @@ class PycopterWebApp:
         return self._finish_plot(fig)
 
     def _plot_cumulative_loads(self, case: HoverCase):
-        fig, ax1 = plt.subplots(figsize=self._figure_size())
-        for label, hover in self._iter_hover_results(case):
-            rows = pd.DataFrame(load_rows_for_result(hover))
-            ax1.plot(rows["r_over_R"], rows["dT_N"].cumsum(), label=f"{label} thrust")
-        ax1.set_xlabel("r/R")
-        ax1.set_ylabel("Cumulative Thrust [N/blade]")
-        ax1.grid(True)
-        ax2 = ax1.twinx()
-        for label, hover in self._iter_hover_results(case):
-            rows = pd.DataFrame(load_rows_for_result(hover))
-            ax2.plot(rows["r_over_R"], rows["dP_W"].cumsum(), linestyle="--", label=f"{label} power")
-        ax2.set_ylabel("Cumulative Power [W/blade]")
-        fig.suptitle("Cumulative Per-Blade Load Build-Up")
-        fig.legend(loc="upper right")
-        return self._finish_plot(fig)
+        return self._plot_element_series(
+            case,
+            (
+                (lambda rows: rows["dT_N"].cumsum(), "Cumulative Thrust [N/blade]", "thrust [N/blade]"),
+                (lambda rows: rows["dP_W"].cumsum(), "Cumulative Power [W/blade]", "power [W/blade]"),
+            ),
+            "Cumulative Per-Blade Load Build-Up",
+        )
 
     def _plot_stall_margin(self, case: HoverCase):
         cfg = self._current_config()
@@ -1601,19 +1800,27 @@ class PycopterWebApp:
     def _plot_geometry_load_contribution(self, case: HoverCase):
         station_frame = self.station_table.value.copy()
         fig, (ax_geom, ax_loads) = plt.subplots(2, 1, figsize=self._figure_size(), sharex=False)
-        ax_geom.plot(station_frame["r_over_R"], station_frame["chord_m"], marker="o", label="Chord [m]")
+        self._accent_axis(ax_geom, SERIES_COLORS[0])
+        ax_geom.plot(
+            station_frame["r_over_R"],
+            station_frame["chord_m"],
+            marker="o",
+            color=SERIES_COLORS[0],
+            label="Chord [m]",
+        )
         ax_geom.set_ylabel("Chord [m]")
         ax_geom.grid(True)
-        ax_twist = ax_geom.twinx()
+        ax_twist = self._twin_axis(ax_geom, SERIES_COLORS[1])
         ax_twist.plot(
             station_frame["r_over_R"],
             station_frame["twist_deg"],
             marker="s",
-            color="tab:red",
+            color=SERIES_COLORS[1],
             label="Twist [deg]",
         )
         ax_twist.set_ylabel("Twist [deg]")
         ax_geom.set_title("Control-Point Geometry")
+        self._combined_legend(ax_geom, ax_twist)
 
         for label, hover in self._iter_hover_results(case):
             rows = pd.DataFrame(load_rows_for_result(hover))
@@ -1730,16 +1937,22 @@ class PycopterWebApp:
         ax_power.grid(True)
         ax_power.legend()
 
-        ax_endurance.plot(diameters_valid, endurance, marker="s", color="tab:green", label=self._endurance_label(base_config))
-        ax_mach = ax_endurance.twinx()
-        ax_mach.plot(diameters_valid, tip_mach, linestyle="--", color="tab:red", label="Max Mach")
+        self._accent_axis(ax_endurance, SERIES_COLORS[0])
+        ax_endurance.plot(
+            diameters_valid,
+            endurance,
+            marker="s",
+            color=SERIES_COLORS[0],
+            label=self._endurance_label(base_config),
+        )
+        ax_mach = self._twin_axis(ax_endurance, SERIES_COLORS[1])
+        ax_mach.plot(diameters_valid, tip_mach, linestyle="--", color=SERIES_COLORS[1], label="Max Mach")
         ax_endurance.axvline(diameter, color=THEME["warning"], linestyle="--", linewidth=1.0)
         ax_endurance.set_xlabel("Rotor Diameter [m]")
         ax_endurance.set_ylabel(self._endurance_label(base_config))
         ax_mach.set_ylabel("Max Mach")
         ax_endurance.grid(True)
-        ax_endurance.legend(loc="upper left")
-        ax_mach.legend(loc="upper right")
+        self._combined_legend(ax_endurance, ax_mach)
         fig.suptitle("Rotor Diameter Sizing")
         return self._finish_plot(fig)
 
@@ -1843,16 +2056,16 @@ class PycopterWebApp:
         shaft_power = [total_hover_power_W(item[1]) / 1000.0 for item in valid]
 
         fig, (ax_thrust, ax_torque) = plt.subplots(2, 1, figsize=self._figure_size(), sharex=True)
-        ax_thrust.plot(x, thrust, marker="o", label="Total Thrust [N]")
-        ax_power = ax_thrust.twinx()
-        ax_power.plot(x, shaft_power, marker="s", linestyle="--", color="tab:green", label="Shaft Power [kW]")
+        self._accent_axis(ax_thrust, SERIES_COLORS[0])
+        ax_thrust.plot(x, thrust, marker="o", color=SERIES_COLORS[0], label="Total Thrust [N]")
+        ax_power = self._twin_axis(ax_thrust, SERIES_COLORS[1])
+        ax_power.plot(x, shaft_power, marker="s", linestyle="--", color=SERIES_COLORS[1], label="Shaft Power [kW]")
         ax_thrust.axhline(total_hover_thrust_N(case), color=THEME["warning"], linestyle="--", linewidth=1.0, label="Current Thrust")
         ax_thrust.set_ylabel("Total Thrust [N]")
         ax_power.set_ylabel("Shaft Power [kW]")
         ax_thrust.set_title("Lift Authority")
         ax_thrust.grid(True)
-        ax_thrust.legend(loc="upper left")
-        ax_power.legend(loc="upper right")
+        self._combined_legend(ax_thrust, ax_power, loc="upper left")
 
         ax_torque.plot(x, yaw_torque, marker="o", color="tab:red", label="Aircraft Yaw Torque [Nm]")
         ax_torque.axhline(0.0, color=THEME["warning"], linestyle="--", linewidth=1.0)
@@ -2192,15 +2405,16 @@ class PycopterWebApp:
         estimates = velocity_sweep(case.rotor, hover, density_kg_m3=float(cfg["density"]), flat_plate_area_m2=float(cfg["fpa"]))
         velocities, endurance, flight_range = electric_range_sweep(estimates, cfg)
         fig, ax1 = plt.subplots(figsize=self._figure_size())
-        ax1.plot(velocities, endurance, label="Endurance")
+        self._accent_axis(ax1, SERIES_COLORS[0])
+        ax1.plot(velocities, endurance, color=SERIES_COLORS[0], label="Endurance [hr]")
         ax1.set_xlabel("Velocity [km/hr]")
         ax1.set_ylabel("Endurance [hr]")
         ax1.grid(True)
-        ax2 = ax1.twinx()
-        ax2.plot(velocities, flight_range, color="tab:orange", label="Range")
+        ax2 = self._twin_axis(ax1, SERIES_COLORS[1])
+        ax2.plot(velocities, flight_range, color=SERIES_COLORS[1], label="Range [km]")
         ax2.set_ylabel("Range [km]")
-        fig.suptitle("Electric Range and Endurance")
-        fig.legend(loc="upper right")
+        ax1.set_title("Electric Range and Endurance")
+        self._combined_legend(ax1, ax2)
         return self._finish_plot(fig)
 
     def _plot_fuel_range(self, case: HoverCase):
@@ -2210,15 +2424,98 @@ class PycopterWebApp:
         estimates = velocity_sweep(case.rotor, hover, density_kg_m3=float(cfg["density"]), flat_plate_area_m2=float(cfg["fpa"]))
         velocities, endurance, flight_range = fossil_range_sweep(estimates, hover, cfg)
         fig, ax1 = plt.subplots(figsize=self._figure_size())
-        ax1.plot(velocities, endurance, color="tab:red", label="Endurance")
+        self._accent_axis(ax1, SERIES_COLORS[0])
+        ax1.plot(velocities, endurance, color=SERIES_COLORS[0], label="Endurance [hr]")
         ax1.set_xlabel("Free Stream Velocity [km/hr]")
         ax1.set_ylabel("Endurance [hr]")
         ax1.grid(True)
-        ax2 = ax1.twinx()
-        ax2.plot(velocities, flight_range, label="Range")
+        ax2 = self._twin_axis(ax1, SERIES_COLORS[1])
+        ax2.plot(velocities, flight_range, color=SERIES_COLORS[1], label="Range [km]")
         ax2.set_ylabel("Range [km]")
-        fig.suptitle("Fuel Range and Endurance")
-        fig.legend(loc="upper right")
+        ax1.set_title("Fuel Range and Endurance")
+        self._combined_legend(ax1, ax2)
+        return self._finish_plot(fig)
+
+    def _accent_axis(self, ax, color: str, side: str = "left"):
+        """Tag an axis so _finish_plot colours its ticks, label, and spine."""
+        ax._pycopter_accent = color
+        ax._pycopter_accent_side = side
+        return ax
+
+    def _twin_axis(self, ax, color: str, outward_points: float = 0.0):
+        """Add a right-hand y-axis that shares x with ``ax``.
+
+        Quantities of different units or magnitudes each get their own axis, so
+        a small one is not flattened onto the scale of a large one.
+        """
+        twin = ax.twinx()
+        twin._pycopter_twin = True
+        self._accent_axis(twin, color, side="right")
+        if outward_points:
+            twin.spines["right"].set_position(("outward", outward_points))
+            twin.spines["right"].set_visible(True)
+        return twin
+
+    def _rotor_linestyle(self, index: int) -> str:
+        return ("-", "--", ":")[index % 3]
+
+    def _combined_legend(self, primary_ax, *other_axes, loc: str = "best") -> None:
+        """Draw one legend covering series from every axis in the figure."""
+        handles: list[Any] = []
+        labels: list[str] = []
+        for ax in (primary_ax, *other_axes):
+            ax_handles, ax_labels = ax.get_legend_handles_labels()
+            handles.extend(ax_handles)
+            labels.extend(ax_labels)
+        if handles:
+            primary_ax.legend(handles, labels, loc=loc, fontsize=9)
+
+    def _plot_element_series(self, case: HoverCase, series, title: str):
+        """Plot per-element quantities against r/R, one y-axis per quantity.
+
+        ``series`` is a sequence of ``(column, axis_label, legend_label)``,
+        where ``column`` is either a load-table column name or a callable that
+        derives a series from the load-table frame. Colour identifies the
+        quantity and line style identifies the rotor, so a coaxial case keeps
+        the same colour coding as a single rotor.
+        """
+        fig, base_ax = plt.subplots(figsize=self._figure_size())
+        colors = [SERIES_COLORS[index % len(SERIES_COLORS)] for index in range(len(series))]
+        axes = [self._accent_axis(base_ax, colors[0])]
+        for index in range(1, len(series)):
+            axes.append(
+                self._twin_axis(base_ax, colors[index], outward_points=AXIS_OFFSET_POINTS * (index - 1))
+            )
+
+        rotors = list(self._iter_hover_results(case))
+        marker_slots = max(1, len(series) * len(rotors))
+        for rotor_index, (rotor_label, hover) in enumerate(rotors):
+            rows = pd.DataFrame(load_rows_for_result(hover))
+            linestyle = self._rotor_linestyle(rotor_index)
+            prefix = f"{rotor_label} " if len(rotors) > 1 else ""
+            marker_step = max(1, len(rows) // SERIES_MARKER_COUNT)
+            for index, (ax, color, (column, _, legend_label)) in enumerate(zip(axes, colors, series)):
+                values = column(rows) if callable(column) else rows[column]
+                # Stagger each curve's markers along the span so quantities that
+                # trace the same shape, such as Reynolds and Mach, stay legible.
+                slot = index * len(rotors) + rotor_index
+                ax.plot(
+                    rows["r_over_R"],
+                    values,
+                    color=color,
+                    linestyle=linestyle,
+                    marker=SERIES_MARKERS[index % len(SERIES_MARKERS)],
+                    markersize=4.5,
+                    markevery=((slot * marker_step) // marker_slots, marker_step),
+                    label=f"{prefix}{legend_label}",
+                )
+
+        for ax, (_, axis_label, _) in zip(axes, series):
+            ax.set_ylabel(axis_label)
+        base_ax.set_xlabel("r/R")
+        base_ax.set_title(title)
+        base_ax.grid(True)
+        self._combined_legend(base_ax, *axes[1:])
         return self._finish_plot(fig)
 
     def _collect_hover_sweep(
@@ -2363,16 +2660,28 @@ class PycopterWebApp:
     def _finish_plot(self, fig):
         fig.patch.set_facecolor(THEME["plot"])
         for ax in fig.axes:
+            accent = getattr(ax, "_pycopter_accent", None)
+            is_twin = getattr(ax, "_pycopter_twin", False)
+
             ax.set_facecolor(THEME["plot"])
-            ax.tick_params(colors=THEME["muted"])
+            ax.tick_params(axis="x", colors=THEME["muted"])
+            ax.tick_params(axis="y", colors=accent or THEME["muted"])
             ax.xaxis.label.set_color(THEME["text"])
-            ax.yaxis.label.set_color(THEME["text"])
+            # An accented axis carries one quantity, so tying the label and
+            # ticks to the series colour says which curve the scale belongs to.
+            ax.yaxis.label.set_color(accent or THEME["text"])
             ax.title.set_color(THEME["text"])
-            for spine in ax.spines.values():
+            for side, spine in ax.spines.items():
                 spine.set_color(THEME["border"])
-            for text in ax.get_xticklabels() + ax.get_yticklabels():
+            if accent:
+                ax.spines[getattr(ax, "_pycopter_accent_side", "left")].set_color(accent)
+            for text in ax.get_xticklabels():
                 text.set_color(THEME["muted"])
-            ax.grid(color=THEME["plot_grid"], alpha=0.55, linewidth=0.8)
+            for text in ax.get_yticklabels():
+                text.set_color(accent or THEME["muted"])
+            # Twin axes must not draw a second grid over the primary one.
+            if not is_twin:
+                ax.grid(color=THEME["plot_grid"], alpha=0.55, linewidth=0.8)
             self._style_legend(ax.get_legend())
 
         if fig._suptitle is not None:
