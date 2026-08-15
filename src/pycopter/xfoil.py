@@ -9,6 +9,13 @@ from urllib.request import Request, urlopen
 UIUC_COORD_BASE_URL = "https://m-selig.ae.illinois.edu/ads/coord"
 AIRFOIL_NAME_RE = re.compile(r"^[a-z0-9_.-]+$")
 MAX_XFOIL_ALPHA_DEG = 18
+# Alpha sweep resolution of a generated polar. Finer steps cost XFOIL time but
+# reduce interpolation error where Cl/Cd bend near stall.
+DEFAULT_ALPHA_STEP_DEG = 1.0
+# e^n transition amplification factor. 9 is XFOIL's own default and matches
+# a moderately clean wind tunnel.
+DEFAULT_N_CRIT = 9.0
+DEFAULT_MAX_ITERATIONS = 400
 
 
 def get_repo_root():
@@ -117,7 +124,14 @@ class Xfoil():
         Reads and returns the polar data.
     """
 
-    def __init__(self, new_polar=True, timeout=60):
+    def __init__(
+        self,
+        new_polar=True,
+        timeout=60,
+        alpha_step_deg=DEFAULT_ALPHA_STEP_DEG,
+        n_crit=DEFAULT_N_CRIT,
+        max_iterations=DEFAULT_MAX_ITERATIONS,
+    ):
         """
         Prepares XFOIL paths and runtime settings.
 
@@ -125,6 +139,12 @@ class Xfoil():
         ----------
         new_polar : bool
             Whether to request new polars or use an existing one.
+        alpha_step_deg : float
+            Angle-of-attack increment [deg] of the generated polar sweep.
+        n_crit : float
+            e^n transition amplification factor passed to XFOIL's VPAR menu.
+        max_iterations : int
+            XFOIL viscous iteration limit per alpha point.
         """
         self.new_polar = new_polar
         self.repo_root = get_repo_root()
@@ -133,8 +153,28 @@ class Xfoil():
         self.output_path_for_xfoil = "data/XFOIL6.99/polar.txt"
         self.max_theta = MAX_XFOIL_ALPHA_DEG
         self.timeout = timeout
+        self.alpha_step_deg = float(alpha_step_deg)
+        self.n_crit = float(n_crit)
+        self.max_iterations = int(max_iterations)
         self.error_message = ""
-        
+
+    def alpha_points(self, alpha_min_deg, alpha_max_deg):
+        """Return the alpha sweep [deg] used for one generated polar."""
+        step = self.alpha_step_deg
+        if step <= 0:
+            raise ValueError("alpha_step_deg must be positive.")
+        alpha_max = min(float(alpha_max_deg), float(self.max_theta))
+        alpha_min = float(alpha_min_deg)
+        if alpha_min > alpha_max:
+            return []
+        count = int(round((alpha_max - alpha_min) / step))
+        # Rounding keeps the printed alpha values stable across platforms; XFOIL
+        # is driven with plain decimal commands.
+        points = [round(alpha_min + index * step, 4) for index in range(count + 1)]
+        if points and points[-1] < alpha_max - 1e-9:
+            points.append(round(alpha_max, 4))
+        return points
+
     def simulate(
         self,
         airfoil: str,
@@ -172,7 +212,10 @@ class Xfoil():
 
         inputs_init = airfoil_commands + [
             "oper",
-            "iter 400",
+            f"iter {self.max_iterations}",
+            "vpar",
+            f"n {self.n_crit:g}",
+            "",
             "v",
             str(reynolds),
             f"mach {mach}",
@@ -182,14 +225,13 @@ class Xfoil():
         ]
         if alpha_max_deg is None:
             alpha_max_deg = self.max_theta
-        alpha_min = int(round(alpha_min_deg))
-        alpha_max = min(int(round(alpha_max_deg)), self.max_theta)
-        if alpha_min > alpha_max:
+        alphas = self.alpha_points(alpha_min_deg, alpha_max_deg)
+        if not alphas:
             self.error_message = (
                 f"ERROR - XFOIL alpha range must end at or below {self.max_theta} deg."
             )
             return False
-        inputs = [f"alfa {alfa}" for alfa in range(alpha_min, alpha_max + 1)]
+        inputs = [f"alfa {alfa:g}" for alfa in alphas]
         command = "\n".join(inputs_init + inputs + ["pacc", "", "quit"]) + "\n"
 
         try:

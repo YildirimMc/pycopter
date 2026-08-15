@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from math import acos, atan2, cos, exp, pi, sin, sqrt
 
 import numpy as np
@@ -187,8 +187,13 @@ class HoverSolver:
     ) -> HoverResult:
         """Solve all radial elements at a prescribed collective pitch."""
         r_start = max(rotor.root_radius_m, rotor.stations[0].r_over_R * rotor.radius_m)
-        edges = np.linspace(r_start, rotor.radius_m, self.settings.blade_element_count + 1)
-        self._prepare_polar_cache(rotor, operating_point, edges, external_axial_velocity)
+        edges = self._element_edges(r_start, rotor.radius_m)
+        substituted_bins = self._prepare_polar_cache(
+            rotor,
+            operating_point,
+            edges,
+            external_axial_velocity,
+        )
         element_loads = []
 
         for left, right in zip(edges[:-1], edges[1:]):
@@ -208,7 +213,28 @@ class HoverSolver:
                 )
             )
 
-        return self._integrate_result(rotor, operating_point, collective_pitch_deg, element_loads)
+        return self._integrate_result(
+            rotor,
+            operating_point,
+            collective_pitch_deg,
+            element_loads,
+            substituted_bins,
+        )
+
+    def _element_edges(self, r_start: float, radius_m: float) -> np.ndarray:
+        """Radial element edges for the configured spacing law.
+
+        Cosine spacing clusters elements at the root cutout and the tip, where
+        the Prandtl loss factor and the spanwise loading change fastest. It
+        keeps the same element count and the same span, so it is a resolution
+        choice rather than a model change.
+        """
+        count = self.settings.blade_element_count
+        if self.settings.element_spacing == "cosine":
+            angles = np.linspace(0.0, np.pi, count + 1)
+            fractions = 0.5 * (1.0 - np.cos(angles))
+            return r_start + (radius_m - r_start) * fractions
+        return np.linspace(r_start, radius_m, count + 1)
 
     def _prepare_polar_cache(
         self,
@@ -216,10 +242,10 @@ class HoverSolver:
         operating_point: OperatingPoint,
         edges: np.ndarray,
         external_axial_velocity: ExternalVelocityProfile | None,
-    ) -> None:
+    ) -> tuple[str, ...]:
         prepare_conditions = getattr(self.polar_provider, "prepare_conditions", None)
         if prepare_conditions is None:
-            return
+            return ()
 
         induced_estimates = self._prefetch_induced_velocity_estimates(
             rotor,
@@ -242,6 +268,22 @@ class HoverSolver:
                 conditions.append((rotor.airfoil_at(r_over_R), reynolds, mach))
 
         prepare_conditions(conditions)
+        return self._substituted_polar_bins(conditions)
+
+    def _substituted_polar_bins(
+        self,
+        conditions: list[tuple[str, float, float]],
+    ) -> tuple[str, ...]:
+        """Labels of the polar bins that answered an out-of-range request."""
+        polar_bin_report = getattr(self.polar_provider, "polar_bin_report", None)
+        if polar_bin_report is None:
+            return ()
+        labels: list[str] = []
+        for record in polar_bin_report(conditions):
+            label = str(record.get("label", ""))
+            if record.get("substituted") and label and label not in labels:
+                labels.append(label)
+        return tuple(labels)
 
     def _prefetch_induced_velocity_estimates(
         self,
@@ -469,6 +511,7 @@ class HoverSolver:
         operating_point: OperatingPoint,
         collective_pitch_deg: float,
         element_loads: list[ElementLoad],
+        substituted_polar_bins: tuple[str, ...] = (),
     ) -> HoverResult:
         per_blade_thrust_N = sum(load.dT_N for load in element_loads)
         total_thrust_N = rotor.num_blades * per_blade_thrust_N
@@ -549,6 +592,7 @@ class HoverSolver:
             root_lag_moment_Nm_per_blade=root_lag,
             aerodynamic_pitching_moment_Nm_per_blade=pitch_moment,
             element_loads=element_loads,
+            substituted_polar_bins=substituted_polar_bins,
         )
 
 
@@ -644,6 +688,90 @@ def solve_coaxial_hover(
         lower_external_velocity_mean_m_s=lower_external_mean,
         wake_radius_m=wake_radius,
         wake_velocity_m_s=wake_velocity,
+    )
+
+
+@dataclass(frozen=True)
+class InterferenceSweepPoint:
+    """One solved (or failed) point of a coaxial spacing sweep."""
+
+    z_over_R: float
+    result: CoaxialHoverResult | None = None
+    error: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.result is not None
+
+
+@dataclass(frozen=True)
+class InterferenceSweep:
+    """Result of a coaxial spacing sweep, including partial and cancelled runs."""
+
+    points: tuple[InterferenceSweepPoint, ...]
+    requested_points: int
+    cancelled: bool = False
+
+    @property
+    def solved_points(self) -> tuple[InterferenceSweepPoint, ...]:
+        return tuple(point for point in self.points if point.ok)
+
+    @property
+    def failed_points(self) -> tuple[InterferenceSweepPoint, ...]:
+        return tuple(point for point in self.points if not point.ok)
+
+
+def sweep_interference_loss(
+    coaxial_spec: CoaxialSpec,
+    operating_point: OperatingPoint,
+    z_over_R_values,
+    *,
+    polar_provider: PolarProvider | None = None,
+    settings: HoverSolverSettings | None = None,
+    progress=None,
+    cancel=None,
+) -> InterferenceSweep:
+    """Solve coaxial hover across rotor spacings, reporting progress per point.
+
+    ``progress`` is called as ``progress(index, total, z_over_R, point)`` after
+    each point, where ``index`` is 1-based and ``point`` is the
+    :class:`InterferenceSweepPoint` just completed, so a caller can draw a
+    partial curve while the sweep runs. ``cancel`` is polled before each point
+    and stops the sweep, which still returns every point solved so far.
+
+    A point that fails to converge is recorded with its error instead of
+    aborting the sweep, because a single unreachable spacing should not discard
+    the rest of the curve.
+    """
+    spacings = [float(value) for value in z_over_R_values]
+    points: list[InterferenceSweepPoint] = []
+    cancelled = False
+
+    for index, spacing in enumerate(spacings, start=1):
+        if cancel is not None and cancel():
+            cancelled = True
+            break
+        try:
+            result = solve_coaxial_hover(
+                replace(coaxial_spec, spacing_ratio=spacing),
+                operating_point,
+                polar_provider=polar_provider,
+                settings=settings,
+            )
+            point = InterferenceSweepPoint(z_over_R=spacing, result=result)
+        except Exception as err:
+            point = InterferenceSweepPoint(
+                z_over_R=spacing,
+                error=f"{type(err).__name__}: {err}",
+            )
+        points.append(point)
+        if progress is not None:
+            progress(index, len(spacings), spacing, point)
+
+    return InterferenceSweep(
+        points=tuple(points),
+        requested_points=len(spacings),
+        cancelled=cancelled,
     )
 
 

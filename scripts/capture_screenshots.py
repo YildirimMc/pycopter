@@ -61,7 +61,7 @@ def _click_button(page, label: str) -> None:
             "label",
             """
             const button = deepAll(document, []).find(
-                el => el.tagName === 'BUTTON' && (el.textContent || '').includes(label));
+                el => el.tagName === 'BUTTON' && (el.textContent || '').trim() === label);
             if (!button || button.disabled) { return false; }
             button.click();
             return true;
@@ -152,11 +152,8 @@ def main() -> int:
             page.screenshot(path=OUTPUT_DIR / "dashboard-empty.png")
             print(f"saved {OUTPUT_DIR / 'dashboard-empty.png'}")
 
-            _click_button(page, "Initialize Rotor")
-            page.wait_for_timeout(1500)
-
-            print("running hover calculation (first run generates XFOIL polars)...")
-            _click_button(page, "Calculate Hover")
+            print("solving the first run (it generates XFOIL polars)...")
+            _click_button(page, "SOLVE AS NEW RUN")
             deadline = time.monotonic() + HOVER_TIMEOUT_S
             while time.monotonic() < deadline:
                 if _plot_is_ready(page):
@@ -166,16 +163,14 @@ def main() -> int:
                 raise RuntimeError("Hover calculation did not finish before the timeout.")
             page.wait_for_timeout(1500)
 
-            page.screenshot(path=OUTPUT_DIR / "dashboard-hover.png")
-            print(f"saved {OUTPUT_DIR / 'dashboard-hover.png'}")
-
             for plot_name, filename in (
-                ("Radial Loads", "plot-radial-loads.png"),
+                ("Radial Loads", "dashboard-hover.png"),
                 ("Alpha, Re, Mach vs Radius", "plot-alpha-re-mach.png"),
                 ("Disk Loading Sensitivity", "plot-disk-loading.png"),
+                ("Radial Loads", "plot-radial-loads.png"),
             ):
                 _select_plot(page, plot_name)
-                _click_button(page, "Generate Plot")
+                _click_button(page, "GENERATE")
                 deadline = time.monotonic() + HOVER_TIMEOUT_S
                 while time.monotonic() < deadline:
                     if _plot_is_ready(page):
@@ -185,13 +180,26 @@ def main() -> int:
                 page.screenshot(path=OUTPUT_DIR / filename)
                 print(f"saved {OUTPUT_DIR / filename}")
 
-            _activate_tab(page, "Summary")
+            _activate_tab(page, "SUMMARY")
             page.screenshot(path=OUTPUT_DIR / "dashboard-summary.png")
             print(f"saved {OUTPUT_DIR / 'dashboard-summary.png'}")
 
-            _activate_tab(page, "Blade Element Loads")
+            _activate_tab(page, "LOADS")
             page.screenshot(path=OUTPUT_DIR / "dashboard-blade-loads.png")
             print(f"saved {OUTPUT_DIR / 'dashboard-blade-loads.png'}")
+
+            _activate_tab(page, "POLARS")
+            page.screenshot(path=OUTPUT_DIR / "dashboard-polars.png")
+            print(f"saved {OUTPUT_DIR / 'dashboard-polars.png'}")
+
+            # The XFOIL tab is the only place the MPI worker strip lives, and
+            # the expanded log is where the severity filter shows up.
+            _click_button(page, "XFOIL")
+            page.wait_for_timeout(500)
+            _click_button(page, "EXPAND ˄")
+            page.wait_for_timeout(1200)
+            page.screenshot(path=OUTPUT_DIR / "dashboard-xfoil-log.png")
+            print(f"saved {OUTPUT_DIR / 'dashboard-xfoil-log.png'}")
 
             browser.close()
     finally:

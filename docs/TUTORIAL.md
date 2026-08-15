@@ -13,9 +13,10 @@ open, see [Quick start](../README.md#quick-start) in the README.
 - [7. Propulsion and endurance](#7-propulsion-and-endurance)
 - [8. Coaxial rotors](#8-coaxial-rotors)
 - [9. Design studies with the plots](#9-design-studies-with-the-plots)
-- [10. Saving, loading, exporting](#10-saving-loading-exporting)
-- [11. Worked example: sizing a 1 kg drone rotor](#11-worked-example-sizing-a-1-kg-drone-rotor)
-- [12. Validating against real helicopters](#12-validating-against-real-helicopters)
+- [10. Runs, baselines, and comparing designs](#10-runs-baselines-and-comparing-designs)
+- [11. Saving, loading, exporting](#11-saving-loading-exporting)
+- [12. Worked example: sizing a 1 kg drone rotor](#12-worked-example-sizing-a-1-kg-drone-rotor)
+- [13. Validating against real helicopters](#13-validating-against-real-helicopters)
 - [Troubleshooting](#troubleshooting)
 
 ---
@@ -24,43 +25,67 @@ open, see [Quick start](../README.md#quick-start) in the README.
 
 ![Empty dashboard](images/dashboard-empty.png)
 
-The window has four regions:
+The window is a fixed-height app shell. Left to right, top to bottom:
 
-- **Toolbar** (top) — new/save/load configuration and the export buttons.
-- **Rotor Parameters** (left column) — the rotor and its blade geometry.
-- **Calculation Parameters and Propulsion Estimation** (middle column) — flight
-  condition, solver settings, and the energy source.
-- **Results** (right) — the plot picker, then the Plot, Summary, and Blade
-  Element Loads tabs.
-- **Run log** (bottom) — timestamped output from every action, including
-  warnings.
+- **Command bar** — the **PYCOPTER** brand opens the app menu (new session,
+  open/save config, recent configs, the four exports, preferences). Next to it a
+  breadcrumb shows `<config file> / <active run>` plus state tags, then the
+  coaxial `SHOWING` toggle, then the solver state, XFOIL cache size, and MPI
+  worker count.
+- **Icon rail** — six subsystems: `ROTOR`, `BLADE`, `OPER`, `SOLVER`, `XFOIL`,
+  `PROP`. The `‹` at the bottom collapses the inspector and gives its width to
+  the canvas.
+- **Inspector** — the settings of the selected subsystem only, so you see the
+  six fields you are working on rather than all sixty. A field you change away
+  from the loaded configuration is outlined in the accent colour and counted in
+  the inspector header, which is how you see what you changed without re-reading
+  the whole form. `REVERT` puts everything back.
+- **Canvas** — the metric strip, the plot picker and `GENERATE`, then the
+  `PLOT`, `SUMMARY`, `LOADS`, and `POLARS` tabs.
+- **Run rail** — every calculation of the session, newest first.
+- **Log** — a one-line status strip that drags upwards into a filtered
+  terminal.
 
-Each column scrolls on its own, so opening a collapsible section never moves
-anything else. The plot area grows to fill whatever space your monitor has.
+Every region scrolls on its own, so switching tabs, expanding the log, or
+collapsing the inspector never moves anything else. The canvas grows to fill
+whatever space your monitor has.
 
-**Resizing the run log.** Drag the horizontal grip just above the log to pull
-it upwards when you want to read more output; the plot area gives up the space.
+**Resizing the run log.** Drag the horizontal rule just above the log to pull
+it upwards when you want to read more output; the canvas gives up the space.
 Its starting height is the minimum, so it only grows from there, and
-double-clicking the grip snaps it back.
+double-clicking the rule snaps it back. `EXPAND` does the same in one click.
+Expanded, a severity column filters the scrollback to `ALL`, `WARN`, `ERROR`,
+or `SOLVER` lines, with a count beside each.
+
+**The metric strip** answers "what did this design just do" without opening a
+tab. Eight cells, each with a value, a unit, and a delta against the baseline
+run. The delta is coloured by *goodness*, not by sign: more power is red, a
+higher figure of merit is green, and a yaw torque moving away from zero is red
+whichever way it went.
 
 ---
 
 ## 2. Defining a rotor
 
+The `ROTOR` tab holds the disk and its speed; the airfoil and blade shape live
+on `BLADE`.
+
 | Input | Meaning |
 |---|---|
-| **Airfoil** | NACA 4/5/6-digit name (`naca0012`) or a UIUC database name, which is downloaded on demand. Used for every station unless a station overrides it. |
-| **Rotor System** | *Single rotor* or *Coaxial*. |
-| **Blades per Rotor** | Blades on **one** rotor, not the aircraft total. For coaxial, the same count applies to each rotor. |
-| **Blade Chord [m]** | Uniform chord, used by the quick-entry geometry mode. |
-| **Rotor Diameter [m]** | Disk diameter. |
-| **Root Twist / Tip Twist [deg]** | Built-in twist at the first station and at the tip. The blade is linearly twisted between them in quick-entry mode. Twist is *added to* collective pitch, so a tip twist below the root twist is normal washout. |
-| **Root Cutout r/R** | Fraction of the radius taken up by the hub, where no blade exists. That annulus produces no lift and is excluded. |
-| **Upper / Ref RPM [rpm]** | Rotor speed. For coaxial, this is the upper (reference) rotor; the lower one follows the gear ratio in *Coaxial Settings*. |
+| **System** | *Single rotor* or *Coaxial*. The coaxial fields below it stay greyed out until you pick *Coaxial*. |
+| **Blades / rotor** | Blades on **one** rotor, not the aircraft total. For coaxial, the same count applies to each rotor. |
+| **Diameter [m]** | Disk diameter. |
+| **Root cutout [r/R]** | Fraction of the radius taken up by the hub, where no blade exists. That annulus produces no lift and is excluded. |
+| **Upper RPM [rpm]** | Rotor speed. For coaxial, this is the upper (reference) rotor. |
+| **RPM ratio** | Lower/upper gear ratio; the resulting **Lower RPM** is shown next to it. |
+| **Spacing [z/R]** | Vertical gap between coaxial disks over the upper rotor radius. |
+| **Coll. bias [deg]** | Fixed collective offset applied to the lower rotor. |
+| **Lower scale** | Scales lower rotor diameter and chord if the two rotors differ. |
 
-Press **Initialize Rotor**. The log reports tip speed, tip Mach, disk area, and
-solidity — a fast sanity check. Keep helicopter tip Mach roughly in the
-0.55–0.65 band; small drone rotors typically run much lower.
+Under **Derived**, tip speed, tip Mach, and disk area update as you type, so you
+can sanity-check a diameter or an RPM before solving anything. Keep helicopter
+tip Mach roughly in the 0.55–0.65 band; small drone rotors typically run much
+lower.
 
 > **Blades per rotor changed meaning.** Older PyCopter versions let you fake a
 > multi-rotor aircraft by entering the total blade count. That is no longer
@@ -70,12 +95,21 @@ solidity — a fast sanity check. Keep helicopter tip Mach roughly in the
 
 ## 3. Blade geometry
 
-**Geometry Source** picks how the blade is described:
+On the `BLADE` tab, **Airfoil** takes a NACA 4/5/6-digit name (`naca0012`) or a
+UIUC database name, which is downloaded on demand. It applies to every station
+unless a station overrides it.
 
-- **Uniform root/tip controls** — chord, root twist, and tip twist above define
-  a linearly twisted, constant-chord blade.
-- **Blade control point table** — the table is the source of truth, so you can
-  taper the chord, use non-linear twist, and blend airfoils along the span.
+**Geometry source** picks how the blade is described:
+
+- **Uniform** — chord, root twist, and tip twist define a linearly twisted,
+  constant-chord blade across **Station count** control points.
+- **Station table** — the table is the source of truth, so you can taper the
+  chord, use non-linear twist, and blend airfoils along the span. Chord and
+  station count grey out, because the table now owns them.
+
+Twist is *added to* collective pitch, so a tip twist below the root twist is
+normal washout. **Moment axis** is the chord fraction the pitching moment is
+taken about, typically `0.25` — a *moment reference*, not blade pitch.
 
 Table columns:
 
@@ -84,31 +118,44 @@ Table columns:
 | **r/R** | Station position, from root cutout to 1.0. Must ascend and be unique. |
 | **Chord [m]** | Local chord. |
 | **Twist [deg]** | Local built-in twist. |
-| **Airfoil Override** | Leave blank to inherit the global airfoil; fill it to blend sections along the blade. |
-| **Moment Axis [c]** | Chord fraction the pitching moment is taken about, typically `0.25`. This is a *moment reference*, not blade pitch. |
+| **Airfoil** | Leave blank to inherit the global airfoil; fill it to blend sections along the blade. |
+| **Axis [c]** | Per-station override of the moment reference axis. |
 
-**Reset Geometry Points From Root/Tip Twist** refills the table from the
-quick-entry fields — a convenient starting point before you edit it.
+**Reset from root/tip twist** refills the table from the quick-entry fields — a
+convenient starting point before you edit it.
+
+Under **Derived**, solidity, blade area, and aspect ratio follow whichever mode
+is active.
 
 The solver interpolates these control points onto its own radial elements
-(**Blade Elements**, default 60), so four well-placed rows are enough to define
-a realistic blade.
+(**Blade elements** on the `SOLVER` tab, default 60), so four well-placed rows
+are enough to define a realistic blade.
 
 ---
 
 ## 4. Hover conditions
 
+The `OPER` tab holds the air and the aircraft.
+
 | Input | Meaning |
 |---|---|
-| **Gross Mass [kg]** | Total aircraft mass to be lifted. The solver trims collective until the rotor produces this weight in thrust. |
-| **Density [kg/m3]** | Air density at the altitude of interest. Sea-level ISA is 1.225. |
-| **Kinematic Viscosity [m2/s]** | Sets the local Reynolds numbers. Sea-level air is about 1.5e-5. |
-| **Blade Elements** | Radial stations in the solve. 60 is a good default; more costs time and adds little. |
-| **Search From / Search To [deg]** | Collective search bounds for the trim. |
+| **Gross mass [kg]** | Total aircraft mass to be lifted. The solver trims collective until the rotor produces this weight in thrust. |
+| **Flight mode** | *Hover*, or *Forward flight* to also offer the legacy single-rotor forward-flight plots. |
+| **Density [kg/m³]** | Air density at the altitude of interest. Sea-level ISA is 1.225. |
+| **Kin. viscosity [m²/s]** | Sets the local Reynolds numbers. Sea-level air is about 1.5e-5. |
+| **Speed of sound [m/s]** | Sets the local Mach used for polar lookup and the reported tip Mach. |
 
-Press **Calculate Hover**.
+**Atmosphere helper.** Enter an **Altitude** and a **Temperature** and press
+**Apply ISA to density / viscosity**. Those two fields never reach the solver on
+their own; the button derives density, kinematic viscosity, and speed of sound
+from them and writes them into the three fields above, and the log records what
+it wrote. That keeps one source of truth for what the solver actually used.
 
-If the reported collective sits exactly on **Search To**, the solver hit its
+Under **Derived**, target thrust and disk loading follow the gross mass.
+
+Press **SOLVE AS NEW RUN**.
+
+If the reported collective sits exactly on **Search to**, the solver hit its
 bound rather than converging — the rotor could not lift the mass. Check total
 thrust against the target before trusting anything else, then raise the bound,
 enlarge the rotor, or lower the mass.
@@ -117,41 +164,73 @@ enlarge the rotor, or lower the mass.
 
 ## 5. Solver and XFOIL settings
 
-Collapsed by default; open them from the middle column.
+**`SOLVER` tab**
 
-**Background Solver Settings**
-
-- **Tip Loss / Root Loss** — Prandtl loss models, or none. Prandtl is the
+- **Trim mode** — *Target thrust* solves collective for the gross mass;
+  *Fixed collective* evaluates the **Collective** you enter, which enables that
+  field.
+- **Blade elements / Spacing law** — radial resolution of the solve. 60 uniform
+  elements is a good default. *Cosine* spacing clusters elements at the root
+  cutout and the tip, where the loss factor and the loading gradient change
+  fastest, without changing the element count or the span.
+- **Search from / Search to [deg]** — collective search bounds for the trim.
+- **Thrust tol. / Max iter** — how tightly and for how long the trim loop
+  chases the target thrust.
+- **Tip loss / Root loss** — Prandtl loss models, or none. Prandtl is the
   sensible default; turning them off is a comparison aid.
-- **Induced Factor** — empirical multiplier (about 1.05–1.15) covering
+- **Induced factor** — empirical multiplier (about 1.05–1.15) covering
   non-uniform inflow that momentum theory misses.
+- **Coaxial trim** — *Torque balance* solves total thrust with zero net yaw
+  torque, the realistic case. *Equal thrust* and *Equal collective* are
+  comparison modes.
 
-**XFOIL Polar Generation**
+**`XFOIL` tab**
 
-- **Run XFOIL For Missing Polars** — when on, missing Reynolds/Mach bins are
-  generated and cached. When off, only cached polars are used and XFOIL is never
-  launched. Turn it off for fast repeat runs on a blade you have already solved.
-- **XFOIL Alpha Min / Max [deg]** — angle-of-attack range of the generated
+The MPI worker strip sits at the top of this tab and only here, with the polar
+cache size, airfoil count, and queue depth beside it.
+
+- **Mode** — *Cache + gen* generates and caches missing Reynolds/Mach bins.
+  *Cache only* never launches XFOIL: a missing bin is an error, not a silent
+  approximation. Use it for fast repeat runs on a blade you have already solved.
+  The generation settings grey out in that mode, because they would be
+  misleading if they still looked live.
+- **Workers / Backend** — how many parallel XFOIL processes, and whether to
+  distribute them over MPI. Choose *Serial debug* if you have no MPI runtime.
+- **Alpha min / max / step [deg]** — range and resolution of the generated
   tables. The maximum is capped at 18°, because XFOIL does not converge
-  dependably past stall.
-- **XFOIL Workers / Backend** — how many parallel XFOIL processes, and whether
-  to distribute them over MPI. Choose *Serial debug* if you have no MPI runtime.
-- **XFOIL Cache Dir** — optional custom cache path. Generated polars are scratch
+  dependably past stall. A finer step costs XFOIL time and produces a different
+  table, so it uses its own cache entry.
+- **N crit** — e^n transition amplification factor. 9 is XFOIL's default and
+  matches a moderately clean wind tunnel; lower values trip the boundary layer
+  earlier. It is part of the cache key.
+- **Re bin / Mach bin** — how coarsely flow conditions are grouped before a
+  polar is generated. Narrower bins mean more XFOIL runs and finer resolution.
+- **XFOIL iter / Timeout** — viscous iteration limit per alpha point, and the
+  per-polar process timeout.
+- **Cache directory** — optional custom cache path. Generated polars are scratch
   data and are never committed.
 
 If any blade element asks for an angle of attack outside the loaded polar range,
-the run log warns you, names the affected rotor, and reports the requested
-range. Coefficients are clamped at the edge, so the result is optimistic in that
-region — widen the alpha range and regenerate rather than ignoring it.
+an amber bar appears under the command bar naming the affected rotor and the
+requested range, and **SHOW CLAMPED ROWS** jumps to the `LOADS` tab with the
+filter already applied. Coefficients are clamped at the edge, so the result is
+optimistic in that region — widen the alpha range and regenerate rather than
+ignoring it.
 
 ---
 
 ## 6. Reading the results
 
-### Plot tab
+### PLOT tab
 
 Whatever you last generated. The figure is drawn at the size of your plot area,
 so it stays legible on any monitor.
+
+**Overlay compare.** Tick runs in the rail and switch on
+`overlay selected runs (n)`. Every checked run is drawn on the current
+per-element plot in the same colours, but wider, translucent, dashed per run,
+and underneath the active run — so a compared curve that lands on top of the
+active one reads as a halo around it instead of hiding it.
 
 **Reading multi-quantity plots.** Quantities are arranged by their actual
 scale. Two that sit within a factor of five share one y-axis. One that is much
@@ -169,7 +248,7 @@ to local blade speed, so they trace exactly the same shape. Put on opposite
 autoscaled axes they would draw the same line and one would silently hide the
 other, so PyCopter always separates them into different panels.
 
-### Summary tab
+### SUMMARY tab
 
 ![Summary tab](images/dashboard-summary.png)
 
@@ -187,41 +266,70 @@ expected, not a bug.
 from above, negative is clockwise. A single rotor always produces some, which a
 tail rotor must counter; a torque-balanced coaxial pair drives it to zero.
 
-### Blade Element Loads tab
+### LOADS tab
 
 ![Blade element loads](images/dashboard-blade-loads.png)
 
-One row per radial element: position, chord, twist, angle of attack, Reynolds,
-Mach, section coefficients, loss factor, induced velocity, and the element's
-thrust, torque, power, and pitching moment. The table scrolls horizontally
-rather than hiding columns, and rows can be selected and copied.
+One row per radial element, grouped into `GEOMETRY`, `LOCAL FLOW`,
+`SECTION COEFFICIENTS`, and `INTEGRATED LOADS`: position, chord, twist, angle of
+attack, Reynolds, Mach, section coefficients, loss factor, induced velocity, and
+the element's thrust, torque, power, and pitching moment. `r_over_R` is frozen
+as the row key while the rest scrolls horizontally, and rows can be selected and
+copied but never edited.
+
+The shading selector heatmaps one column: `ALPHA` shades green where there is
+margin, amber within 2° of the polar ceiling, and red where the coefficient had
+to be clamped; `CL/CD` shades by section efficiency; `OFF` turns it off. Clamped
+rows also carry a `CLAMPED` flag, `clamped rows only` filters to them, and the
+footer counts how many there are and how many sit within 2° of the limit.
 
 This is where you diagnose a design. Angle of attack climbing toward the polar
 limit near the tip means you are running out of stall margin; a collapsing
 Reynolds number near the root means that part of the blade is doing little
 useful work.
 
+### POLARS tab
+
+![Polar bins](images/dashboard-polars.png)
+
+The airfoil/Reynolds/Mach bins that actually answered this run, one row each,
+with the alpha range of the table, how many times it was looked up, and its cache
+file. `status` says where the data came from:
+
+- **cache** — read from an existing cache file.
+- **generated** — XFOIL produced it during this session.
+- **substituted** — the requested Reynolds or Mach fell outside the provider's
+  supported range and was clamped, so the polar describes a *different* flow
+  condition than the blade element asked for. Rounding into a Re/Mach bin is the
+  normal binning scheme and is not flagged here.
+
+This is where an XFOIL problem becomes explainable instead of just a log line.
+
 ---
 
 ## 7. Propulsion and endurance
 
-Choose the **Electric** or **Fossil fuel** tab. Only the active model appears in
-outputs and plots, so the two never mix.
+On the `PROP` tab, set **Model** to *Electric* or *Fossil fuel*. Only the active
+model's fields are shown and only its outputs appear in the summary and the
+plots, so the two never mix.
 
-**Transmission Loss** is the mechanical loss between the power source and the
+**Transmission loss** is the mechanical loss between the power source and the
 rotor shaft, applied in both models.
 
-**Electric:** Battery [Wh], Usable Fraction (reserve — 0.8 is a common limit),
-Motor Efficiency, ESC Efficiency. PyCopter reports electric input power and
-hover endurance in minutes.
+**Electric:** Battery [Wh], Usable fraction (reserve — 0.8 is a common limit),
+Motor eff., ESC eff. PyCopter reports electric input power and hover endurance
+in minutes.
 
-**Fossil fuel:** Fuel Capacity [kg] and Specific Fuel Consumption [kg/kWh].
-PyCopter reports engine input power, fuel flow, and hover endurance in hours.
+**Fossil fuel:** Fuel capacity [kg] and SFC [kg/kWh]. PyCopter reports engine
+input power, fuel flow, and hover endurance in hours.
+
+**Active model outputs** under the fields shows those three numbers for the
+selected run without leaving the tab.
 
 The rotor solve produces **shaft power only**. Everything above is applied
 downstream, so changing the battery never changes the aerodynamics.
 
-**Forward flight** (Velocity, Flat Plate Area) is a legacy low-order estimate
+**Legacy forward flight** (Velocity, Flat plate area) is a low-order estimate
 for single rotors, kept for range and endurance trends. It has no trim or
 flapping model — see [Scope and limitations](../README.md#scope-and-limitations).
 Flat plate area is the fuselage's equivalent drag area, either from published
@@ -231,20 +339,24 @@ data or as reference area × drag coefficient.
 
 ## 8. Coaxial rotors
 
-Set **Rotor System** to *Coaxial* and open **Coaxial Settings**.
-
-| Input | Meaning |
-|---|---|
-| **Coaxial Trim Objective** | *Torque-balanced hover* solves total thrust with zero net yaw torque — the realistic case. *Equal rotor thrust* and *Equal collective pitch* are comparison modes. |
-| **Rotor Spacing z/R** | Vertical gap between disks over the upper rotor radius. |
-| **Lower/Upper RPM Ratio** | Gear ratio; the resulting lower RPM is shown next to it. |
-| **Lower Collective Bias [deg]** | Fixed collective offset applied to the lower rotor. |
-| **Lower Geometry Scale** | Scales lower rotor diameter and chord if the two rotors differ. |
+Set **System** to *Coaxial* on the `ROTOR` tab. The spacing, gear ratio,
+collective bias, and lower-rotor scale fields there stop being greyed out, and
+**Coaxial trim** appears on the `SOLVER` tab.
 
 The lower rotor is solved inside the upper rotor's contracted wake, so it sees
-faster inflow and needs more collective for the same thrust. The Summary tab
-reports each rotor's thrust share, the interference power delta, and the
-interference loss ratio.
+faster inflow and needs more collective for the same thrust. The summary reports
+each rotor's thrust share, the interference power delta, and the interference
+loss ratio.
+
+**The SHOWING toggle** appears in the command bar for coaxial runs and decides
+which result the whole canvas reads from — metric strip, summary, loads, and
+plots all follow it together:
+
+| Choice | What you see |
+|---|---|
+| `UPPER` / `LOWER` | That rotor alone. |
+| `TOTAL` | Both rotors, and the pair's totals. |
+| `Δ ISOLATED` | Each rotor minus its isolated reference, element by element. This is the coaxial interaction on its own: what the wake cost in thrust, power, collective, and figure of merit. |
 
 Three coaxial-only plots become available: **Coaxial Interference** (isolated
 versus coaxial power), **Interference Loss vs Spacing** (sweeps z/R and marks
@@ -255,8 +367,8 @@ differential collective).
 
 ## 9. Design studies with the plots
 
-Pick from **Selected Plot** and press **Generate Plot**. Some plots read the
-current result; the sweeps re-run the solver many times and take longer.
+Pick from the plot picker above the tabs and press **GENERATE**. Some plots read
+the current result; the sweeps re-run the solver many times and take longer.
 
 **Understanding the current design**
 
@@ -292,41 +404,93 @@ Sweeps skip points that fail to converge and say so in the log. A sweep that
 skips many points usually means the collective search bounds are too tight for
 part of the range.
 
----
-
-## 10. Saving, loading, exporting
-
-- **Save Config** downloads a JSON file with every input and the station table.
-- **Load Config** restores one. Re-initialize the rotor afterwards. Legacy
-  configs from the old desktop GUI are migrated automatically.
-- **Save Plot / Save Summary / Save Loads** export the current figure as PNG and
-  the two tables as CSV. If you have not generated the artifact yet, the log
-  says so instead of downloading an empty file.
-- **Clear Outputs** empties the run log.
+**Interference Loss vs Spacing** runs off the UI thread. Its run appears in the
+rail with a progress bar, a point counter, and an ETA, and each solved point
+becomes a child run underneath it. **CANCEL** in the inspector footer stops it
+after the point in flight and still draws the partial curve, with the run marked
+*cancelled*. The point count comes from **Sweep points** in Preferences.
 
 ---
 
-## 11. Worked example: sizing a 1 kg drone rotor
+## 10. Runs, baselines, and comparing designs
+
+Every calculation is a run in the right-hand rail, newest first: an id, a label,
+a meta line, its power and figure of merit, and its power delta against the
+baseline.
+
+| State | How it looks |
+|---|---|
+| queued | dim, no values |
+| running | accent dot, progress bar, point counter and ETA |
+| done | values and a delta |
+| current | accent-tinted row |
+| baseline | the delta column reads *baseline* |
+| failed | red dot, tinted row, and the exception text inline underneath |
+
+A failed run does **not** clear the previous result: the canvas keeps showing
+the run you had, and the failure sits in the rail with its error where you can
+read it.
+
+Click a row to make it the active run — the canvas, metric strip, and summary
+all switch to it. **SET BASELINE** makes it the reference every other run's
+delta is measured against. **DELETE** removes it, and removes a sweep's points
+along with its parent. **EXPORT CSV** writes one row per run with every metric
+any of them reported.
+
+Tick the checkboxes and switch on `overlay selected runs (n)` to draw the
+checked runs on the current per-element plot together.
+
+---
+
+## 11. Saving, loading, exporting
+
+Everything here is behind the **PYCOPTER** menu in the command bar.
+
+- **New session** (`Ctrl N`) resets the inputs and clears the run rail.
+- **Open config…** (`Ctrl O`) picks a JSON file, then **Open selected config**
+  applies it. The log first prints a field-by-field diff of what the incoming
+  configuration changes, so you know what you are about to load. Legacy configs
+  from the old desktop GUI are migrated automatically.
+- **Save config** (`Ctrl S`) downloads every input and the station table.
+  **Save config as…** (`Ctrl ⇧ S`) uses the filename you type above it.
+- **Recent configs** re-applies anything you loaded this session.
+- **Export plot PNG / summary CSV / loads CSV / session runs** write the current
+  figure, the two tables, and the whole session's runs. If you have not
+  generated the artifact yet, the log says so instead of downloading an empty
+  file.
+- **Preferences…** holds the session settings: sweep points, figure render DPI,
+  log scrollback, and how many runs a session keeps. They change how much work
+  the UI asks for, never the solver equations, and they save and load with the
+  rest of the configuration.
+
+---
+
+## 12. Worked example: sizing a 1 kg drone rotor
 
 The defaults are a 0.70 m, two-bladed `naca0012` rotor at 2500 rpm lifting 1 kg
 on a 100 Wh battery.
 
-1. **Initialize Rotor**, then **Calculate Hover**. Note the collective, shaft
-   power, figure of merit, and hover endurance.
+1. **SOLVE AS NEW RUN**. Read the metric strip: collective, shaft power, figure
+   of merit, and hover endurance. This is `R-01`, and it starts as the baseline.
 2. Generate **Alpha, Re, Mach vs Radius**. Check that no station is near the
    18° polar ceiling and see how low the root Reynolds number is.
 
    ![Alpha, Reynolds and Mach](images/plot-alpha-re-mach.png)
 
-3. Generate **Stall Margin vs Radius**. Any margin at or below zero means
-   clamped coefficients and an optimistic answer there.
+3. Open `LOADS` with `ALPHA` shading. Amber cells are within 2° of the polar
+   ceiling; red ones were clamped, which makes the answer there optimistic.
 4. Generate **Rotor Diameter Sizing**. Endurance usually improves with diameter
    until tip Mach or airframe limits stop you — read both panels together.
-5. Set the diameter to your best candidate, recalculate hover, and confirm the
-   figure of merit and stall margin held up.
-6. Generate **Payload Endurance Sweep** to see how much margin you have for a
+5. Set the diameter to your best candidate on the `ROTOR` tab. The field
+   outlines in accent and the inspector header reads *1 edited*, so you can see
+   exactly what differs from the loaded configuration. Solve again as `R-02`.
+6. Compare: the metric strip now shows every value as a delta against `R-01`,
+   coloured by whether the change is an improvement. Tick both runs and switch
+   on `overlay selected runs` to see the radial loads side by side.
+7. Generate **Payload Endurance Sweep** to see how much margin you have for a
    camera or a heavier battery.
-7. **Save Config** so the design can be reloaded or shared.
+8. **Save config** so the design can be reloaded or shared, and
+   **Export session runs** to keep the comparison.
 
 The habit worth forming: after every geometry change, re-check the radial plots.
 A change that improves total power while pushing the tip into stall is not an
@@ -334,15 +498,15 @@ improvement.
 
 ---
 
-## 12. Validating against real helicopters
+## 13. Validating against real helicopters
 
 [`tutorials/presets/`](../tutorials/presets/) holds three configurations —
 Mil Mi-8, MD 500E, and UH-60L (extended fuel) — with reference range plots
 produced by the original desktop GUI.
 
-Load one with **Load Config**, initialize, and calculate. These are full-size
-helicopters, so expect much larger diameters, higher tip speeds, and higher
-figures of merit than the drone defaults.
+Load one from the app menu and solve. These are full-size helicopters, so expect
+much larger diameters, higher tip speeds, and higher figures of merit than the
+drone defaults.
 
 `tests/test_hover_real_world_cases.py` checks hover power for a Robinson R22 and
 a UH-60 against published figures and runs as part of the suite.
@@ -357,21 +521,27 @@ a UH-60 against published figures and runs as part of the suite.
 
 **"MPI XFOIL polar generation was requested, but mpi4py could not load an MPI
 runtime."** Install [Microsoft MPI](https://learn.microsoft.com/en-us/message-passing-interface/microsoft-mpi),
-or set **XFOIL Backend** to *Serial debug*.
+or set **Backend** on the `XFOIL` tab to *Serial debug*.
 
 **The first hover calculation is slow.** It is generating XFOIL polars for every
 Reynolds/Mach bin the blade needs. They are cached, so later runs on the same
-blade are much faster. Turn off *Run XFOIL For Missing Polars* to force
-cache-only runs.
+blade are much faster. Set **Mode** to *Cache only* to force cache-only runs.
+Changing **Alpha step** or **N crit** changes the generated table, so those bins
+are regenerated rather than reused.
 
-**Collective lands exactly on Search To.** The trim did not converge — the rotor
+**Collective lands exactly on Search to.** The trim did not converge — the rotor
 cannot lift the requested mass within the search bounds. Compare total thrust
 against the target.
 
-**"blade elements requested alpha outside the loaded polar range".** The blade
-is asking for angles the polars do not cover. Widen XFOIL Alpha Min/Max, enable
-*Run XFOIL For Missing Polars*, and recalculate. Results in that region are
-clamped and optimistic until you do.
+**The amber bar says elements were clamped.** The blade is asking for angles the
+polars do not cover. Press **SHOW CLAMPED ROWS** to see exactly which stations,
+then widen Alpha min/max, keep **Mode** on *Cache + gen*, and solve again.
+Results in that region are clamped and optimistic until you do.
+
+**The POLARS tab reports substituted bins.** A station asked for a Reynolds or
+Mach number outside the provider's supported range, so it was answered with a
+polar for a different condition. Widen the provider range or check whether the
+rotor speed and chord are what you meant.
 
 **An airfoil name is rejected.** NACA names must be `naca` plus 4, 5, or 6
 digits. Other names are looked up in the UIUC database and need an internet
@@ -379,4 +549,7 @@ connection on first use.
 
 **A sweep reports skipped points.** Those cases did not converge, usually
 because the collective search bounds are too narrow across the swept range.
-Widen Search From/To and try again.
+Widen Search from/to and try again.
+
+**A run failed.** Its row in the rail carries the exception text inline. The
+previous result is still on the canvas, so you can read both.

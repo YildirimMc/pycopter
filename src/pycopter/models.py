@@ -13,6 +13,7 @@ GRAVITY_M_S2 = 9.81
 TrimMode = Literal["target_thrust", "fixed_collective"]
 LossModel = Literal["prandtl", "none"]
 CoaxialTrimMode = Literal["torque_balance", "equal_thrust", "equal_collective"]
+ElementSpacing = Literal["uniform", "cosine"]
 
 
 @dataclass(frozen=True)
@@ -228,6 +229,10 @@ class HoverSolverSettings:
     root_loss_model: LossModel = "prandtl"
     induced_power_factor: float = 1.05
     min_loss_factor: float = 1e-3
+    # Radial distribution of the blade elements. 'uniform' is the historical
+    # behaviour; 'cosine' clusters elements at the root cutout and the tip,
+    # where the loss factor and the loading gradient change fastest.
+    element_spacing: ElementSpacing = "uniform"
 
     def __post_init__(self) -> None:
         if self.blade_element_count < 2:
@@ -248,6 +253,8 @@ class HoverSolverSettings:
             raise ValueError("induced_power_factor must be at least 1.0.")
         if not 0.0 < self.min_loss_factor <= 1.0:
             raise ValueError("min_loss_factor must be in (0, 1].")
+        if self.element_spacing not in ("uniform", "cosine"):
+            raise ValueError("element_spacing must be 'uniform' or 'cosine'.")
 
 
 @dataclass(frozen=True)
@@ -305,10 +312,42 @@ class HoverResult:
     root_lag_moment_Nm_per_blade: float
     aerodynamic_pitching_moment_Nm_per_blade: float
     element_loads: list[ElementLoad] = field(default_factory=list)
+    # Polar bins whose requested Reynolds or Mach fell outside the provider's
+    # supported range, so a neighbouring condition was used instead. Reported
+    # as data so the GUI does not have to parse log text for it.
+    substituted_polar_bins: tuple[str, ...] = ()
 
     def load_table(self) -> list[dict[str, float]]:
         """Return element loads as GUI/CSV-friendly dictionaries."""
         return [load.__dict__.copy() for load in self.element_loads]
+
+    @property
+    def clamped_element_count(self) -> int:
+        """Number of elements whose alpha fell outside the loaded polar table."""
+        return sum(1 for load in self.element_loads if load.alpha_clamped)
+
+    @property
+    def clamped_alpha_range_deg(self) -> tuple[float, float] | None:
+        """Requested alpha range of the clamped elements, or None if there are none."""
+        alphas = [load.alpha_deg for load in self.element_loads if load.alpha_clamped]
+        if not alphas:
+            return None
+        return (min(alphas), max(alphas))
+
+    @property
+    def warnings(self) -> tuple[str, ...]:
+        """Structured solver warnings for this rotor result."""
+        messages: list[str] = []
+        clamped = self.clamped_element_count
+        if clamped:
+            alpha_range = self.clamped_alpha_range_deg
+            messages.append(
+                f"{clamped} elements clamped at the polar table edge "
+                f"(alpha {alpha_range[0]:.1f}..{alpha_range[1]:.1f} deg)"
+            )
+        for label in self.substituted_polar_bins:
+            messages.append(f"substituted polar bin {label}")
+        return tuple(messages)
 
 
 @dataclass(frozen=True)
@@ -364,6 +403,36 @@ class CoaxialHoverResult:
     lower_external_velocity_mean_m_s: float
     wake_radius_m: float
     wake_velocity_m_s: float
+
+    @property
+    def clamped_element_count(self) -> int:
+        """Clamped elements across the upper and lower rotor of the pair."""
+        return self.upper.clamped_element_count + self.lower.clamped_element_count
+
+    @property
+    def substituted_polar_bins(self) -> tuple[str, ...]:
+        seen: list[str] = []
+        for rotor_result in (self.upper, self.lower):
+            for label in rotor_result.substituted_polar_bins:
+                if label not in seen:
+                    seen.append(label)
+        return tuple(seen)
+
+    @property
+    def warnings(self) -> tuple[str, ...]:
+        """Structured solver warnings, labelled per rotor."""
+        messages: list[str] = []
+        for label, rotor_result in (("upper", self.upper), ("lower", self.lower)):
+            clamped = rotor_result.clamped_element_count
+            if clamped:
+                alpha_range = rotor_result.clamped_alpha_range_deg
+                messages.append(
+                    f"{label} rotor: {clamped} elements clamped at the polar table edge "
+                    f"(alpha {alpha_range[0]:.1f}..{alpha_range[1]:.1f} deg)"
+                )
+        for bin_label in self.substituted_polar_bins:
+            messages.append(f"substituted polar bin {bin_label}")
+        return tuple(messages)
 
 
 ExternalVelocityProfile = Callable[[float], float]

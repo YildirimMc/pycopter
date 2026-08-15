@@ -28,11 +28,22 @@ from pycopter.xfoil import ensure_airfoil_coordinates, is_naca_airfoil, normaliz
 PropulsionModel = Literal["electric", "fossil"]
 RotorSystemType = Literal["single", "coaxial"]
 GeometryMode = Literal["uniform", "station_table"]
+FlightMode = Literal["hover", "forward_flight"]
 
 CONFIG_VERSION = 1
 SHP_PER_WATT = 0.00134102209
 MPS_TO_KMH = 3.6
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+# International Standard Atmosphere constants for the troposphere.
+ISA_SEA_LEVEL_TEMPERATURE_K = 288.15
+ISA_SEA_LEVEL_PRESSURE_PA = 101325.0
+ISA_LAPSE_RATE_K_PER_M = -0.0065
+ISA_GAS_CONSTANT_J_PER_KG_K = 287.05287
+ISA_GRAVITY_M_S2 = 9.80665
+ISA_HEAT_RATIO = 1.4
+SUTHERLAND_COEFFICIENT = 1.458e-6
+SUTHERLAND_TEMPERATURE_K = 110.4
 
 
 DEFAULT_STATION_ROWS: list[dict[str, Any]] = [
@@ -58,19 +69,34 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "headspeed_input_mode": "rpm",
     "headspeed_rpm": 2500.0,
     "tip_speed_mach": 0.0,
+    "station_count": 4,
+    "station_pitch_axis_frac": 0.25,
     "gross": 1.0,
     "density": 1.225,
     "kinematic_viscosity_m2_s": 1.5e-5,
+    "speed_of_sound_m_s": 343.0,
+    "altitude_m": 0.0,
+    "temperature_C": 15.0,
+    "flight_mode": "hover",
     "trim_mode": "target_thrust",
-    "collective_pitch_deg": 0.0,
+    "collective_pitch_deg": 8.0,
     "min_collective_deg": 0.0,
     "max_collective_deg": 15.0,
     "blade_element_count": 60,
+    "element_spacing": "uniform",
+    "thrust_tolerance": 1.0e-3,
+    "max_trim_iterations": 80,
     "tip_loss_model": "prandtl",
     "root_loss_model": "prandtl",
     "induced_power_factor": 1.05,
     "polar_alpha_min_deg": -3.0,
     "polar_alpha_max_deg": 18.0,
+    "polar_alpha_step_deg": 1.0,
+    "polar_reynolds_bin": 100000.0,
+    "polar_mach_bin": 0.1,
+    "polar_n_crit": 9.0,
+    "xfoil_max_iterations": 400,
+    "xfoil_timeout_s": 60,
     "xfoil_parallel_workers": 8,
     "xfoil_parallel_backend": "mpi",
     "xfoil_cache_directory": "",
@@ -89,6 +115,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "lower_collective_offset_deg": 0.0,
     "lower_rotor_speed_ratio": 1.0,
     "lower_rotor_scale": 1.0,
+    # Session/UI preferences. They never reach the solver equations; they set
+    # how much work the UI asks for and how much of it it keeps.
+    "sweep_points": 25,
+    "plot_render_dpi": 144,
+    "log_scrollback_lines": 1000,
+    "max_session_runs": 200,
 }
 
 
@@ -179,11 +211,18 @@ def validate_airfoil(airfoil: str) -> str:
     return normalized
 
 
-def station_rows_from_uniform(config: dict[str, Any], station_count: int = 4) -> list[dict[str, Any]]:
+def station_rows_from_uniform(
+    config: dict[str, Any],
+    station_count: int | None = None,
+) -> list[dict[str, Any]]:
+    if station_count is None:
+        station_count = int(config.get("station_count", 4))
+    station_count = max(2, int(station_count))
     first_station = max(float(config["root_cutout"]), 0.02)
     radii = np.linspace(first_station, 1.0, station_count)
     root_twist = float(config["root_twist_deg"])
     tip_twist = float(config["tip_twist_deg"])
+    pitch_axis = float(config.get("station_pitch_axis_frac", 0.25))
     rows: list[dict[str, Any]] = []
     for r_over_R in radii:
         span_fraction = (r_over_R - first_station) / (1.0 - first_station)
@@ -193,13 +232,119 @@ def station_rows_from_uniform(config: dict[str, Any], station_count: int = 4) ->
                 "chord_m": float(config["chord"]),
                 "twist_deg": root_twist + (tip_twist - root_twist) * float(span_fraction),
                 "airfoil": "",
-                "pitch_axis_frac": 0.25,
+                "pitch_axis_frac": pitch_axis,
             }
         )
     return rows
 
 
-def build_stations(rows: list[dict[str, Any]], global_airfoil: str) -> list[BladeStation]:
+def isa_atmosphere(
+    altitude_m: float,
+    temperature_C: float | None = None,
+) -> dict[str, float]:
+    """Return air properties for an altitude, optionally at a non-standard temperature.
+
+    Pressure follows the ISA troposphere profile. When ``temperature_C`` is
+    given it is treated as the actual outside air temperature at that altitude,
+    so density is ISA pressure divided by the actual temperature - the usual
+    "ISA + delta T" construction. Dynamic viscosity uses Sutherland's law.
+
+    Returned units: density [kg/m3], kinematic viscosity [m2/s], speed of sound
+    [m/s], pressure [Pa], temperature [K] and [C].
+    """
+    altitude_m = float(altitude_m)
+    isa_temperature_K = ISA_SEA_LEVEL_TEMPERATURE_K + ISA_LAPSE_RATE_K_PER_M * altitude_m
+    if isa_temperature_K <= 0.0:
+        raise ValueError("Altitude is outside the modelled troposphere.")
+
+    pressure_exponent = -ISA_GRAVITY_M_S2 / (
+        ISA_LAPSE_RATE_K_PER_M * ISA_GAS_CONSTANT_J_PER_KG_K
+    )
+    pressure_Pa = ISA_SEA_LEVEL_PRESSURE_PA * (
+        isa_temperature_K / ISA_SEA_LEVEL_TEMPERATURE_K
+    ) ** pressure_exponent
+
+    temperature_K = (
+        isa_temperature_K if temperature_C is None else float(temperature_C) + 273.15
+    )
+    if temperature_K <= 0.0:
+        raise ValueError("Temperature must be above absolute zero.")
+
+    density_kg_m3 = pressure_Pa / (ISA_GAS_CONSTANT_J_PER_KG_K * temperature_K)
+    dynamic_viscosity = (
+        SUTHERLAND_COEFFICIENT
+        * temperature_K**1.5
+        / (temperature_K + SUTHERLAND_TEMPERATURE_K)
+    )
+    return {
+        "density_kg_m3": density_kg_m3,
+        "kinematic_viscosity_m2_s": dynamic_viscosity / density_kg_m3,
+        "speed_of_sound_m_s": float(
+            np.sqrt(ISA_HEAT_RATIO * ISA_GAS_CONSTANT_J_PER_KG_K * temperature_K)
+        ),
+        "pressure_Pa": pressure_Pa,
+        "temperature_K": temperature_K,
+        "temperature_C": temperature_K - 273.15,
+        "isa_temperature_C": isa_temperature_K - 273.15,
+    }
+
+
+def derived_geometry(
+    config: dict[str, Any],
+    station_rows: list[dict[str, Any]] | None = None,
+) -> dict[str, float]:
+    """GUI-only display quantities derived from the current inputs.
+
+    None of these reach the solver; they exist so the inspector can show what a
+    typed number means before a run is solved.
+    """
+    config = normalize_config(config)
+    radius_m = float(config["rotor_diam"]) / 2.0
+    root_cutout = float(config["root_cutout"])
+    omega_rad_s = float(config["headspeed_rpm"]) * pi / 30.0
+    tip_speed_m_s = omega_rad_s * radius_m
+    speed_of_sound = float(config.get("speed_of_sound_m_s", 343.0))
+    disk_area_m2 = pi * (radius_m**2 - (root_cutout * radius_m) ** 2)
+
+    rows = station_rows
+    if config["geometry_mode"] == "uniform" or not rows:
+        rows = station_rows_from_uniform(config)
+    radii = [float(row["r_over_R"]) * radius_m for row in rows]
+    chords = [float(row["chord_m"]) for row in rows]
+    if len(radii) >= 2:
+        blade_area_m2 = float(np.trapezoid(chords, radii))
+        mean_chord_m = blade_area_m2 / max(radii[-1] - radii[0], 1e-9)
+    else:
+        mean_chord_m = float(chords[0]) if chords else 0.0
+        blade_area_m2 = mean_chord_m * max(radius_m - root_cutout * radius_m, 0.0)
+
+    num_blades = int(config["num_blades"])
+    solidity = num_blades * mean_chord_m / (pi * radius_m) if radius_m > 0 else 0.0
+    aspect_ratio = radius_m / mean_chord_m if mean_chord_m > 0 else 0.0
+    return {
+        "tip_speed_m_s": tip_speed_m_s,
+        "tip_speed_mach": tip_speed_m_s / speed_of_sound if speed_of_sound > 0 else 0.0,
+        "disk_area_m2": disk_area_m2,
+        "blade_area_m2": blade_area_m2,
+        "total_blade_area_m2": blade_area_m2 * num_blades,
+        "mean_chord_m": mean_chord_m,
+        "aspect_ratio": aspect_ratio,
+        "solidity": solidity,
+        "station_count": float(len(rows)),
+        "target_thrust_N": float(config["gross"]) * 9.81,
+        "lower_headspeed_rpm": float(config["headspeed_rpm"])
+        * float(config["lower_rotor_speed_ratio"]),
+        "disk_loading_N_m2": (
+            float(config["gross"]) * 9.81 / disk_area_m2 if disk_area_m2 > 0 else 0.0
+        ),
+    }
+
+
+def build_stations(
+    rows: list[dict[str, Any]],
+    global_airfoil: str,
+    default_pitch_axis_frac: float = 0.25,
+) -> list[BladeStation]:
     if len(rows) < 2:
         raise ValueError("Blade station table must include at least two rows.")
 
@@ -213,13 +358,16 @@ def build_stations(rows: list[dict[str, Any]], global_airfoil: str) -> list[Blad
 
         row_airfoil = str(row.get("airfoil") or "").strip()
         airfoil = validate_airfoil(row_airfoil) if row_airfoil else global_airfoil
+        pitch_axis = row.get("pitch_axis_frac")
         stations.append(
             BladeStation(
                 r_over_R=r_over_R,
                 chord_m=float(row["chord_m"]),
                 twist_deg=float(row["twist_deg"]),
                 airfoil=airfoil or global_airfoil,
-                pitch_axis_frac=float(row.get("pitch_axis_frac", 0.25)),
+                pitch_axis_frac=(
+                    default_pitch_axis_frac if pitch_axis is None else float(pitch_axis)
+                ),
             )
         )
     return stations
@@ -238,49 +386,38 @@ def build_rotor_spec(
     if headspeed_ratio <= 0.0:
         raise ValueError("headspeed_ratio must be positive.")
     headspeed_rpm = float(config["headspeed_rpm"]) * float(headspeed_ratio)
-    tip_speed_mach = None
+    pitch_axis = float(config.get("station_pitch_axis_frac", 0.25))
+    speed_of_sound = float(config.get("speed_of_sound_m_s", 343.0))
 
     if config["geometry_mode"] == "uniform":
-        uniform_rows = station_rows_from_uniform(config)
-        for row in uniform_rows:
-            row["chord_m"] = float(row["chord_m"]) * scale
-        return RotorSpec(
-            airfoil=airfoil,
-            num_blades=int(config["num_blades"]),
-            rotor_diameter_m=float(config["rotor_diam"]) * scale,
-            stations=build_stations(uniform_rows, airfoil),
-            headspeed_rpm=headspeed_rpm,
-            root_cutout_ratio=float(config["root_cutout"]),
-            name=name,
-            rotation_direction=rotation_direction,
-        )
-
-    scaled_rows = []
-    for row in station_rows:
-        scaled = dict(row)
-        scaled["chord_m"] = float(row["chord_m"]) * scale
-        scaled_rows.append(scaled)
+        rows = station_rows_from_uniform(config)
+    else:
+        rows = [dict(row) for row in station_rows]
+    for row in rows:
+        row["chord_m"] = float(row["chord_m"]) * scale
 
     return RotorSpec(
         airfoil=airfoil,
         num_blades=int(config["num_blades"]),
         rotor_diameter_m=float(config["rotor_diam"]) * scale,
-        stations=build_stations(scaled_rows, airfoil),
+        stations=build_stations(rows, airfoil, pitch_axis),
         headspeed_rpm=headspeed_rpm,
-        tip_speed_mach=tip_speed_mach,
         root_cutout_ratio=float(config["root_cutout"]),
+        speed_of_sound_m_s=speed_of_sound,
         name=name,
         rotation_direction=rotation_direction,
     )
 
 
 def build_operating_point(config: dict[str, Any]) -> OperatingPoint:
+    trim_mode = str(config.get("trim_mode", "target_thrust"))
     return OperatingPoint(
         density_kg_m3=float(config["density"]),
         kinematic_viscosity_m2_s=float(config["kinematic_viscosity_m2_s"]),
+        speed_of_sound_m_s=float(config.get("speed_of_sound_m_s", 343.0)),
         gross_mass_kg=float(config["gross"]),
-        collective_pitch_deg=0.0,
-        trim_mode="target_thrust",
+        collective_pitch_deg=float(config.get("collective_pitch_deg", 8.0)),
+        trim_mode=trim_mode,
     )
 
 
@@ -289,13 +426,19 @@ def build_solver_settings(config: dict[str, Any]) -> HoverSolverSettings:
         blade_element_count=int(config["blade_element_count"]),
         min_collective_deg=float(config["min_collective_deg"]),
         max_collective_deg=float(config["max_collective_deg"]),
+        thrust_tolerance=float(config.get("thrust_tolerance", 1.0e-3)),
+        max_trim_iterations=int(config.get("max_trim_iterations", 80)),
         tip_loss_model=str(config["tip_loss_model"]),
         root_loss_model=str(config["root_loss_model"]),
         induced_power_factor=float(config["induced_power_factor"]),
+        element_spacing=str(config.get("element_spacing", "uniform")),
     )
 
 
-def build_xfoil_provider(config: dict[str, Any]) -> XfoilPolarProvider:
+def build_xfoil_provider(
+    config: dict[str, Any],
+    progress_callback=None,
+) -> XfoilPolarProvider:
     cache_directory = str(config.get("xfoil_cache_directory") or "").strip()
     resolved_cache_directory = (
         Path(cache_directory)
@@ -306,9 +449,39 @@ def build_xfoil_provider(config: dict[str, Any]) -> XfoilPolarProvider:
         new_polar=bool(config["new_polars"]),
         alpha_min_deg=float(config["polar_alpha_min_deg"]),
         alpha_max_deg=float(config["polar_alpha_max_deg"]),
+        alpha_step_deg=float(config.get("polar_alpha_step_deg", 1.0)),
+        reynolds_bin=float(config.get("polar_reynolds_bin", 100000.0)),
+        mach_bin=float(config.get("polar_mach_bin", 0.1)),
+        n_crit=float(config.get("polar_n_crit", 9.0)),
+        max_iterations=int(config.get("xfoil_max_iterations", 400)),
+        timeout=int(config.get("xfoil_timeout_s", 60)),
         parallel_workers=int(config["xfoil_parallel_workers"]),
         parallel_backend=str(config["xfoil_parallel_backend"]),
         cache_directory=resolved_cache_directory,
+        progress_callback=progress_callback,
+    )
+
+
+def build_coaxial_spec(
+    config: dict[str, Any],
+    upper_rotor: RotorSpec,
+    lower_rotor: RotorSpec,
+) -> CoaxialSpec:
+    """Build the coaxial definition, honouring the GUI trim mode.
+
+    Fixed-collective trim has no coaxial thrust/torque objective to solve, so
+    it maps onto the equal-collective coaxial mode with the lower rotor bias
+    applied as an offset.
+    """
+    coaxial_trim_mode = str(config["coaxial_trim_mode"])
+    if str(config.get("trim_mode", "target_thrust")) == "fixed_collective":
+        coaxial_trim_mode = "equal_collective"
+    return CoaxialSpec(
+        upper_rotor=upper_rotor,
+        lower_rotor=lower_rotor,
+        spacing_ratio=float(config["coaxial_spacing_ratio"]),
+        trim_mode=coaxial_trim_mode,
+        lower_collective_offset_deg=float(config["lower_collective_offset_deg"]),
     )
 
 
@@ -334,13 +507,7 @@ def run_hover_case(
             rotation_direction=-1,
         )
         result = solve_coaxial_hover(
-            CoaxialSpec(
-                upper_rotor=rotor,
-                lower_rotor=lower,
-                spacing_ratio=float(config["coaxial_spacing_ratio"]),
-                trim_mode=str(config["coaxial_trim_mode"]),
-                lower_collective_offset_deg=float(config["lower_collective_offset_deg"]),
-            ),
+            build_coaxial_spec(config, rotor, lower),
             operating_point,
             polar_provider=provider,
             settings=settings,
@@ -349,6 +516,11 @@ def run_hover_case(
 
     solver = HoverSolver(provider, settings)
     return HoverCase(rotor=rotor, result=solver.solve(rotor, operating_point), system_type="single")
+
+
+def hover_case_warnings(case: HoverCase) -> tuple[str, ...]:
+    """Structured warnings for a solved case, straight from the result."""
+    return tuple(case.result.warnings)
 
 
 def primary_hover_result(case: HoverCase) -> HoverResult:

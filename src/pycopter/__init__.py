@@ -4,7 +4,13 @@ __author__ = """Mehar Can Yildirim"""
 __email__ = 'yildirimmehar@gmail.com'
 __version__ = '0.0.1'
 
-from .bemt import HoverSolver, solve_coaxial_hover
+from .bemt import (
+    HoverSolver,
+    InterferenceSweep,
+    InterferenceSweepPoint,
+    solve_coaxial_hover,
+    sweep_interference_loss,
+)
 from .models import (
     BladeStation,
     CoaxialHoverResult,
@@ -15,7 +21,13 @@ from .models import (
     OperatingPoint,
     RotorSpec,
 )
-from .polars import AirfoilCoefficients, AirfoilPolar, LinearPolarProvider, XfoilPolarProvider
+from .polars import (
+    AirfoilCoefficients,
+    AirfoilPolar,
+    LinearPolarProvider,
+    PolarBinRecord,
+    XfoilPolarProvider,
+)
 from .pycopter import Body, Copter, Engine, Optimizer, Rotor, RotorImperial
 
 __all__ = [
@@ -31,12 +43,16 @@ __all__ = [
     "HoverResult",
     "HoverSolver",
     "HoverSolverSettings",
+    "InterferenceSweep",
+    "InterferenceSweepPoint",
     "LinearPolarProvider",
     "OperatingPoint",
     "Optimizer",
+    "PolarBinRecord",
     "Rotor",
     "RotorImperial",
     "RotorSpec",
     "XfoilPolarProvider",
     "solve_coaxial_hover",
+    "sweep_interference_loss",
 ]

@@ -15,8 +15,7 @@ def _free_port():
 
 # Panel renders every component into its own shadow root, so the dashboard
 # regions are invisible to a plain document.querySelector.
-DEEP_MEASURE_JS = """
-() => {
+DEEP_ALL_HELPER = """
     function deepAll(root, acc) {
         root.querySelectorAll('*').forEach(el => {
             acc.push(el);
@@ -24,6 +23,12 @@ DEEP_MEASURE_JS = """
         });
         return acc;
     }
+"""
+
+DEEP_MEASURE_JS = (
+    "() => {"
+    + DEEP_ALL_HELPER
+    + """
     const all = deepAll(document, []);
     const pick = (selector) => all.filter(el => el.matches && el.matches(selector));
     const size = (el) => {
@@ -40,23 +45,23 @@ DEEP_MEASURE_JS = """
         viewportHeight: window.innerHeight,
         shell: pick('.pycopter-shell').map(size),
         columns: pick('.pycopter-column').map(size),
+        rail: pick('.pycopter-rail').map(size),
+        inspector: pick('.pycopter-inspector').map(size),
+        runRail: pick('.pycopter-runrail').map(size),
         plotFrame: frames.map(size),
         logRegion: pick('.pycopter-log-region').map(size),
+        metrics: pick('.pycopter-metrics').map(size),
         terminalHeight: terminals.length ? terminals[0].offsetHeight : 0,
     };
 }
 """
+)
 
 # Centre of the log resize grip, in page coordinates.
-GRIP_CENTRE_JS = """
-() => {
-    function deepAll(root, acc) {
-        root.querySelectorAll('*').forEach(el => {
-            acc.push(el);
-            if (el.shadowRoot) { deepAll(el.shadowRoot, acc); }
-        });
-        return acc;
-    }
+GRIP_CENTRE_JS = (
+    "() => {"
+    + DEEP_ALL_HELPER
+    + """
     const grip = deepAll(document, []).find(
         el => el.classList && el.classList.contains('pycopter-log-grip'));
     if (!grip) { return null; }
@@ -64,29 +69,49 @@ GRIP_CENTRE_JS = """
     return {x: box.left + box.width / 2, y: box.top + box.height / 2};
 }
 """
+)
+
+# Switch the tab-gated inspector by clicking an icon-rail button.
+SELECT_TAB_JS = (
+    "(label) => {"
+    + DEEP_ALL_HELPER
+    + """
+    const button = deepAll(document, []).find(
+        el => el.tagName === 'BUTTON' && (el.textContent || '').trim() === label);
+    if (!button) { return 'missing'; }
+    button.click();
+    return 'ok';
+}
+"""
+)
+
+
+def _serve(title):
+    import panel as pn
+
+    port = _free_port()
+    server = pn.serve(
+        {"/dashboard": create_app},
+        address="127.0.0.1",
+        port=port,
+        websocket_origin=_websocket_origins(port),
+        show=False,
+        threaded=True,
+        verbose=False,
+        title=title,
+    )
+    return server, port
 
 
 class TestWebGuiBrowserRender(unittest.TestCase):
     def test_dashboard_renders_in_browser_without_websocket_errors(self):
         try:
-            import panel as pn
             from playwright.sync_api import Error as PlaywrightError
             from playwright.sync_api import sync_playwright
         except ImportError as err:
             self.skipTest(f"Browser render dependencies are unavailable: {err}")
 
-        port = _free_port()
-        server = pn.serve(
-            {"/dashboard": create_app},
-            address="127.0.0.1",
-            port=port,
-            websocket_origin=_websocket_origins(port),
-            show=False,
-            threaded=True,
-            verbose=False,
-            title="pycopter browser test",
-        )
-
+        server, port = _serve("pycopter browser test")
         try:
             with sync_playwright() as playwright:
                 try:
@@ -94,7 +119,7 @@ class TestWebGuiBrowserRender(unittest.TestCase):
                 except PlaywrightError as err:
                     self.skipTest(f"Playwright Chromium is unavailable: {err}")
 
-                page = browser.new_page(viewport={"width": 1366, "height": 900})
+                page = browser.new_page(viewport={"width": 1600, "height": 900})
                 messages = []
                 page.on(
                     "console",
@@ -119,6 +144,10 @@ class TestWebGuiBrowserRender(unittest.TestCase):
             any("websocket" in message.lower() and "failed" in message.lower() for message in messages),
             "\n".join(messages),
         )
+        self.assertFalse(
+            [message for message in messages if message.startswith("error:")],
+            "\n".join(messages),
+        )
         self.assertGreater(button_count, 5)
         self.assertGreater(input_count, 10)
         image = Image.open(__import__("io").BytesIO(screenshot)).convert("RGB")
@@ -129,32 +158,22 @@ class TestWebGuiBrowserRender(unittest.TestCase):
     def test_dashboard_fits_common_monitor_sizes_without_clipping(self):
         """The dashboard must fit the viewport instead of overflowing the page.
 
-        Regression guard for the fixed 1570 px wide, ~1155 px tall layout that
-        clipped on 1920x1080 monitors. Every region now scrolls internally, so
-        expanding the collapsible sections must not change the page geometry.
+        Regression guard for the fixed-size layout that clipped on 1920x1080
+        monitors. Every region scrolls internally, so switching inspector tabs
+        must not change the page geometry or any other region's size.
         """
         try:
-            import panel as pn
             from playwright.sync_api import Error as PlaywrightError
             from playwright.sync_api import sync_playwright
         except ImportError as err:
             self.skipTest(f"Browser render dependencies are unavailable: {err}")
 
-        port = _free_port()
-        server = pn.serve(
-            {"/dashboard": create_app},
-            address="127.0.0.1",
-            port=port,
-            websocket_origin=_websocket_origins(port),
-            show=False,
-            threaded=True,
-            verbose=False,
-            title="pycopter layout test",
-        )
+        server, port = _serve("pycopter layout test")
 
         # 1920x937 and 2560x1329 are maximized browser viewports on 1080p and
-        # 1440p monitors; 1366x728 is a small laptop.
-        viewports = [(1920, 937), (2560, 1329), (1366, 728)]
+        # 1440p monitors; 1600x728 is a small laptop above the 1420 px point
+        # where the body starts to scroll horizontally.
+        viewports = [(1920, 937), (2560, 1329), (1600, 728)]
         measurements = {}
         try:
             with sync_playwright() as playwright:
@@ -171,28 +190,13 @@ class TestWebGuiBrowserRender(unittest.TestCase):
                         timeout=30000,
                     )
                     page.wait_for_timeout(1500)
-                    collapsed = page.evaluate(DEEP_MEASURE_JS)
+                    rotor_tab = page.evaluate(DEEP_MEASURE_JS)
 
-                    page.evaluate(
-                        """
-                        () => {
-                            function deepAll(root, acc) {
-                                root.querySelectorAll('*').forEach(el => {
-                                    acc.push(el);
-                                    if (el.shadowRoot) { deepAll(el.shadowRoot, acc); }
-                                });
-                                return acc;
-                            }
-                            deepAll(document, [])
-                                .filter(el => el.tagName === 'H3' && /Solver Settings|XFOIL Polar|Coaxial Settings/
-                                    .test((el.textContent || '').trim()))
-                                .forEach(header => header.click());
-                        }
-                        """
-                    )
-                    page.wait_for_timeout(800)
-                    expanded = page.evaluate(DEEP_MEASURE_JS)
-                    measurements[(width, height)] = (collapsed, expanded)
+                    for tab in ("BLADE", "OPER", "SOLVER", "XFOIL", "PROP"):
+                        self.assertEqual("ok", page.evaluate(SELECT_TAB_JS, tab))
+                        page.wait_for_timeout(350)
+                    xfoil_tab = page.evaluate(DEEP_MEASURE_JS)
+                    measurements[(width, height)] = (rotor_tab, xfoil_tab)
                     page.close()
 
                 browser.close()
@@ -201,8 +205,8 @@ class TestWebGuiBrowserRender(unittest.TestCase):
             if stop is not None:
                 stop()
 
-        for viewport, (collapsed, expanded) in measurements.items():
-            for state, measured in (("collapsed", collapsed), ("expanded", expanded)):
+        for viewport, (first, last) in measurements.items():
+            for state, measured in (("rotor tab", first), ("prop tab", last)):
                 label = f"{viewport[0]}x{viewport[1]} {state}"
                 self.assertEqual(measured["pageOverflowY"], 0, f"{label} scrolls the page vertically")
                 self.assertEqual(measured["pageOverflowX"], 0, f"{label} scrolls the page horizontally")
@@ -210,24 +214,70 @@ class TestWebGuiBrowserRender(unittest.TestCase):
                 frame = measured["plotFrame"][0]
                 self.assertGreater(frame["width"], 400, f"{label} plot frame is too narrow")
                 self.assertGreater(frame["height"], 400, f"{label} plot frame is too short")
+                # The fixed-width regions of the layout contract.
+                self.assertEqual(60, measured["rail"][0]["width"], f"{label} icon rail width")
+                self.assertEqual(320, measured["inspector"][0]["width"], f"{label} inspector width")
+                self.assertEqual(384, measured["runRail"][0]["width"], f"{label} run rail width")
+                self.assertEqual(30, measured["logRegion"][0]["height"], f"{label} log start height")
 
-            # Opening the collapsible sections must not resize the dashboard.
+            # Changing tabs must not resize any other region.
             self.assertEqual(
-                collapsed["plotFrame"][0],
-                expanded["plotFrame"][0],
-                f"{viewport} plot frame changed size when sections were expanded",
+                first["plotFrame"][0],
+                last["plotFrame"][0],
+                f"{viewport} plot frame changed size when the inspector tab changed",
             )
             self.assertEqual(
-                [column["height"] for column in collapsed["columns"]],
-                [column["height"] for column in expanded["columns"]],
-                f"{viewport} input columns changed height when sections were expanded",
+                [column["height"] for column in first["columns"]],
+                [column["height"] for column in last["columns"]],
+                f"{viewport} scrolling columns changed height when the inspector tab changed",
             )
 
-        # The plot area must actually use the extra room on a larger monitor.
+        # The canvas must actually use the extra room on a larger monitor.
         small_frame = measurements[(1920, 937)][0]["plotFrame"][0]
         large_frame = measurements[(2560, 1329)][0]["plotFrame"][0]
         self.assertGreater(large_frame["width"], small_frame["width"])
         self.assertGreater(large_frame["height"], small_frame["height"])
+
+    def test_collapsing_the_inspector_gives_its_width_to_the_canvas(self):
+        try:
+            from playwright.sync_api import Error as PlaywrightError
+            from playwright.sync_api import sync_playwright
+        except ImportError as err:
+            self.skipTest(f"Browser render dependencies are unavailable: {err}")
+
+        server, port = _serve("pycopter collapse test")
+        try:
+            with sync_playwright() as playwright:
+                try:
+                    browser = playwright.chromium.launch(headless=True)
+                except PlaywrightError as err:
+                    self.skipTest(f"Playwright Chromium is unavailable: {err}")
+
+                page = browser.new_page(viewport={"width": 1920, "height": 937})
+                page.goto(
+                    f"http://127.0.0.1:{port}/dashboard",
+                    wait_until="networkidle",
+                    timeout=30000,
+                )
+                page.wait_for_timeout(1500)
+                before = page.evaluate(DEEP_MEASURE_JS)
+                self.assertEqual("ok", page.evaluate(SELECT_TAB_JS, "‹"))
+                page.wait_for_timeout(800)
+                after = page.evaluate(DEEP_MEASURE_JS)
+                browser.close()
+        finally:
+            stop = getattr(server, "stop", None)
+            if stop is not None:
+                stop()
+
+        self.assertEqual(320, before["inspector"][0]["width"])
+        self.assertEqual(0, after["inspector"][0]["width"])
+        self.assertEqual(
+            before["plotFrame"][0]["width"] + 320,
+            after["plotFrame"][0]["width"],
+        )
+        self.assertEqual(after["pageOverflowX"], 0)
+        self.assertEqual(after["pageOverflowY"], 0)
 
     def test_output_log_drags_upwards_and_compresses_the_plot(self):
         """The log grows upward on drag, taking height from the result area.
@@ -237,24 +287,12 @@ class TestWebGuiBrowserRender(unittest.TestCase):
         box with a short xterm inside it.
         """
         try:
-            import panel as pn
             from playwright.sync_api import Error as PlaywrightError
             from playwright.sync_api import sync_playwright
         except ImportError as err:
             self.skipTest(f"Browser render dependencies are unavailable: {err}")
 
-        port = _free_port()
-        server = pn.serve(
-            {"/dashboard": create_app},
-            address="127.0.0.1",
-            port=port,
-            websocket_origin=_websocket_origins(port),
-            show=False,
-            threaded=True,
-            verbose=False,
-            title="pycopter log splitter test",
-        )
-
+        server, port = _serve("pycopter log splitter test")
         try:
             with sync_playwright() as playwright:
                 try:

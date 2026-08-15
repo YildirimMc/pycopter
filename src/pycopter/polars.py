@@ -11,15 +11,24 @@ import sys
 import tempfile
 import traceback
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Iterable, Literal, Protocol
 
 import numpy as np
 
-from .xfoil import MAX_XFOIL_ALPHA_DEG, Xfoil, get_repo_root, normalize_airfoil_name
+from .xfoil import (
+    DEFAULT_ALPHA_STEP_DEG,
+    DEFAULT_MAX_ITERATIONS,
+    DEFAULT_N_CRIT,
+    MAX_XFOIL_ALPHA_DEG,
+    Xfoil,
+    get_repo_root,
+    normalize_airfoil_name,
+)
 
 ParallelBackend = Literal["mpi", "serial"]
+PolarBinSource = Literal["cache", "generated"]
 
 
 class _ShortTemporaryDirectory:
@@ -150,6 +159,47 @@ class XfoilPolarJobResult:
 
 
 @dataclass(frozen=True)
+class PolarBinRecord:
+    """Provenance of one airfoil/Re/Mach polar bin used by a calculation."""
+
+    airfoil: str
+    reynolds: float
+    mach: float
+    alpha_min_deg: float
+    alpha_max_deg: float
+    source: PolarBinSource
+    # True when the requested Reynolds or Mach fell outside the provider's
+    # supported range and a neighbouring flow condition was used instead.
+    # Ordinary Re/Mach binning is not a substitution.
+    substituted: bool
+    lookups: int
+    cache_file: str
+
+    @property
+    def label(self) -> str:
+        return f"{self.airfoil} Re={self.reynolds:.4g} M={self.mach:.3g}"
+
+    @property
+    def status(self) -> str:
+        return "substituted" if self.substituted else self.source
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "airfoil": self.airfoil,
+            "reynolds": self.reynolds,
+            "mach": self.mach,
+            "alpha_min_deg": self.alpha_min_deg,
+            "alpha_max_deg": self.alpha_max_deg,
+            "source": self.source,
+            "substituted": self.substituted,
+            "status": self.status,
+            "lookups": self.lookups,
+            "cache_file": self.cache_file,
+            "label": self.label,
+        }
+
+
+@dataclass(frozen=True)
 class XfoilPolarJob:
     """Serializable XFOIL worker input for one independent polar generation."""
 
@@ -161,6 +211,9 @@ class XfoilPolarJob:
     new_polar: bool
     timeout: int
     cache_path: Path
+    alpha_step_deg: float = DEFAULT_ALPHA_STEP_DEG
+    n_crit: float = DEFAULT_N_CRIT
+    max_iterations: int = DEFAULT_MAX_ITERATIONS
 
     @property
     def key(self) -> tuple[str, float, float]:
@@ -185,6 +238,9 @@ def _job_to_payload(job: XfoilPolarJob) -> dict[str, object]:
         "new_polar": job.new_polar,
         "timeout": job.timeout,
         "cache_path": str(job.cache_path),
+        "alpha_step_deg": job.alpha_step_deg,
+        "n_crit": job.n_crit,
+        "max_iterations": job.max_iterations,
     }
 
 
@@ -198,6 +254,9 @@ def _job_from_payload(payload: dict[str, object]) -> XfoilPolarJob:
         new_polar=bool(payload["new_polar"]),
         timeout=int(payload["timeout"]),
         cache_path=Path(str(payload["cache_path"])),
+        alpha_step_deg=float(payload.get("alpha_step_deg", DEFAULT_ALPHA_STEP_DEG)),
+        n_crit=float(payload.get("n_crit", DEFAULT_N_CRIT)),
+        max_iterations=int(payload.get("max_iterations", DEFAULT_MAX_ITERATIONS)),
     )
 
 
@@ -425,7 +484,13 @@ def _configure_xfoil_output_for_path(xfoil: Xfoil, output_path: Path) -> None:
 
 def _run_xfoil_polar_job(job: XfoilPolarJob) -> XfoilPolarJobResult:
     """Generate or read one polar table. Safe to execute in an MPI worker."""
-    xfoil = Xfoil(new_polar=job.new_polar, timeout=job.timeout)
+    xfoil = Xfoil(
+        new_polar=job.new_polar,
+        timeout=job.timeout,
+        alpha_step_deg=job.alpha_step_deg,
+        n_crit=job.n_crit,
+        max_iterations=job.max_iterations,
+    )
     _configure_xfoil_output_for_path(xfoil, job.cache_path)
 
     if job.cache_path.exists():
@@ -472,6 +537,13 @@ class LinearPolarProvider:
         """Analytic coefficients need no cache warmup."""
         return None
 
+    def polar_bin_report(
+        self,
+        conditions: Iterable[tuple[str, float, float]] | None = None,
+    ) -> list[dict[str, object]]:
+        """Analytic coefficients are not binned, so there is nothing to report."""
+        return []
+
     def get_coefficients(
         self,
         airfoil: str,
@@ -517,6 +589,10 @@ class XfoilPolarProvider:
         cache_directory: str | Path | None = None,
         parallel_workers: int = 8,
         parallel_backend: ParallelBackend = "mpi",
+        alpha_step_deg: float = DEFAULT_ALPHA_STEP_DEG,
+        n_crit: float = DEFAULT_N_CRIT,
+        max_iterations: int = DEFAULT_MAX_ITERATIONS,
+        progress_callback=None,
     ):
         self.new_polar = new_polar
         self.alpha_min_deg = alpha_min_deg
@@ -542,8 +618,21 @@ class XfoilPolarProvider:
             raise ValueError("parallel_workers must be at least 1.")
         if parallel_backend not in ("mpi", "serial"):
             raise ValueError("parallel_backend must be 'mpi' or 'serial'.")
+        if alpha_step_deg <= 0:
+            raise ValueError("alpha_step_deg must be positive.")
+        if n_crit <= 0:
+            raise ValueError("n_crit must be positive.")
+        if max_iterations < 1:
+            raise ValueError("max_iterations must be at least 1.")
         self.parallel_workers = int(parallel_workers)
         self.parallel_backend = parallel_backend
+        self.alpha_step_deg = float(alpha_step_deg)
+        self.n_crit = float(n_crit)
+        self.max_iterations = int(max_iterations)
+        # Optional callable(event_name, payload) used by the Web UI to show
+        # XFOIL batch state while a calculation runs off the event loop.
+        self.progress_callback = progress_callback
+        self._bin_records: dict[tuple[str, float, float], PolarBinRecord] = {}
         self._temporary_cache = None
         if cache_directory is None:
             temp_root = get_repo_root() / "data" / "XFOIL6.99" / "tmp"
@@ -573,9 +662,10 @@ class XfoilPolarProvider:
         reynolds: float,
         mach: float,
     ) -> AirfoilCoefficients:
-        key = self._condition_key(airfoil, reynolds, mach)
+        key, substituted = self._condition_key_with_flags(airfoil, reynolds, mach)
         if key not in self._cache:
             self.prepare_conditions([(airfoil, reynolds, mach)])
+        self._touch_bin_record(key, substituted=substituted)
         return self._cache[key].coefficients_at(alpha_deg)
 
     def prepare_conditions(
@@ -592,8 +682,10 @@ class XfoilPolarProvider:
         queued_keys = set()
 
         for airfoil, reynolds, mach in conditions:
-            key = self._condition_key(airfoil, reynolds, mach)
+            key, substituted = self._condition_key_with_flags(airfoil, reynolds, mach)
             if key in self._cache or key in queued_keys:
+                if substituted:
+                    self._touch_bin_record(key, substituted=True, count=0)
                 continue
             airfoil_key, reynolds_key, mach_key = key
             cache_path = self._cache_file_path(airfoil_key, reynolds_key, mach_key)
@@ -603,6 +695,7 @@ class XfoilPolarProvider:
                     reynolds_key,
                     mach_key,
                 )
+                self._record_bin(key, source="cache", substituted=substituted)
                 continue
             if not self.new_polar:
                 raise RuntimeError(
@@ -612,12 +705,108 @@ class XfoilPolarProvider:
                 )
             jobs.append(self._create_job(airfoil_key, reynolds_key, mach_key))
             queued_keys.add(key)
+            self._record_bin(key, source="generated", substituted=substituted)
 
         if not jobs:
             return
 
-        for result in self._run_jobs(jobs):
-            self._cache[result.key] = result.to_polar()
+        worker_count = self._effective_worker_count(len(jobs))
+        self._emit("batch_start", {"jobs": len(jobs), "workers": worker_count})
+        try:
+            for result in self._run_jobs(jobs):
+                self._cache[result.key] = result.to_polar()
+        except Exception as err:
+            self._emit("batch_failed", {"jobs": len(jobs), "error": str(err)})
+            raise
+        self._emit("batch_done", {"jobs": len(jobs), "workers": worker_count})
+
+    def polar_bin_report(
+        self,
+        conditions: Iterable[tuple[str, float, float]] | None = None,
+    ) -> list[dict[str, object]]:
+        """Return the provenance of every polar bin this provider has served.
+
+        Passing ``conditions`` narrows the report to the bins those flow
+        conditions resolve to, which is how one calculation reports only its
+        own bins from a session-wide provider.
+        """
+        if conditions is None:
+            records = list(self._bin_records.values())
+        else:
+            wanted = {
+                self._condition_key(airfoil, reynolds, mach)
+                for airfoil, reynolds, mach in conditions
+            }
+            records = [
+                record
+                for key, record in self._bin_records.items()
+                if key in wanted
+            ]
+        records.sort(key=lambda record: (record.airfoil, record.reynolds, record.mach))
+        return [record.as_dict() for record in records]
+
+    def cache_bin_count(self) -> int:
+        """Number of distinct polar bins loaded into this provider."""
+        return len(self._bin_records)
+
+    def cache_file_count(self) -> int:
+        """Number of generated polar files sitting in the cache directory."""
+        try:
+            return sum(1 for path in self.cache_directory.glob("p*.txt") if path.is_file())
+        except OSError:
+            return 0
+
+    def _emit(self, event: str, payload: dict[str, object]) -> None:
+        if self.progress_callback is None:
+            return
+        try:
+            self.progress_callback(event, payload)
+        except Exception:
+            # Progress reporting must never break a calculation.
+            pass
+
+    def _effective_worker_count(self, job_count: int) -> int:
+        if job_count <= 1 or self.parallel_backend == "serial":
+            return 1
+        return max(1, min(self.parallel_workers, job_count))
+
+    def _record_bin(
+        self,
+        key: tuple[str, float, float],
+        *,
+        source: PolarBinSource,
+        substituted: bool,
+    ) -> None:
+        airfoil, reynolds, mach = key
+        existing = self._bin_records.get(key)
+        self._bin_records[key] = PolarBinRecord(
+            airfoil=airfoil,
+            reynolds=reynolds,
+            mach=mach,
+            alpha_min_deg=self.alpha_min_deg,
+            alpha_max_deg=self.alpha_max_deg,
+            source=source,
+            substituted=substituted or bool(existing and existing.substituted),
+            lookups=existing.lookups if existing else 0,
+            cache_file=self._cache_file_path(airfoil, reynolds, mach).name,
+        )
+
+    def _touch_bin_record(
+        self,
+        key: tuple[str, float, float],
+        *,
+        substituted: bool,
+        count: int = 1,
+    ) -> None:
+        existing = self._bin_records.get(key)
+        if existing is None:
+            self._record_bin(key, source="cache", substituted=substituted)
+            existing = self._bin_records[key]
+        self._bin_records[key] = replace(
+            existing,
+            lookups=existing.lookups + count,
+            substituted=existing.substituted or substituted,
+        )
 
     def _condition_key(
         self,
@@ -625,13 +814,30 @@ class XfoilPolarProvider:
         reynolds: float,
         mach: float,
     ) -> tuple[str, float, float]:
+        return self._condition_key_with_flags(airfoil, reynolds, mach)[0]
+
+    def _condition_key_with_flags(
+        self,
+        airfoil: str,
+        reynolds: float,
+        mach: float,
+    ) -> tuple[tuple[str, float, float], bool]:
+        """Return the bin key plus whether the request was outside provider range.
+
+        Rounding a request into a Re/Mach bin is the documented binning scheme,
+        not a substitution. Clamping a request that sits outside the provider's
+        supported range is, because the returned polar then describes a
+        different flow condition than the blade element asked for.
+        """
         normalized = normalize_airfoil_name(airfoil)
-        reynolds_key = self._round_to_positive_bin(
-            min(max(reynolds, 1000.0), self.max_reynolds),
-            self.reynolds_bin,
+        clamped_reynolds = min(max(reynolds, 1000.0), self.max_reynolds)
+        clamped_mach = min(max(mach, 0.0), self.max_mach)
+        substituted = (
+            clamped_reynolds != float(reynolds) or clamped_mach != float(mach)
         )
-        mach_key = self._round_to_bin(min(max(mach, 0.0), self.max_mach), self.mach_bin)
-        return (normalized, reynolds_key, mach_key)
+        reynolds_key = self._round_to_positive_bin(clamped_reynolds, self.reynolds_bin)
+        mach_key = self._round_to_bin(clamped_mach, self.mach_bin)
+        return (normalized, reynolds_key, mach_key), substituted
 
     def _round_to_bin(self, value: float, bin_size: float) -> float:
         if bin_size <= 0:
@@ -651,7 +857,13 @@ class XfoilPolarProvider:
         ).to_polar()
 
     def _read_cached_polar(self, airfoil: str, reynolds: float, mach: float) -> AirfoilPolar:
-        xfoil = Xfoil(new_polar=False, timeout=self.timeout)
+        xfoil = Xfoil(
+            new_polar=False,
+            timeout=self.timeout,
+            alpha_step_deg=self.alpha_step_deg,
+            n_crit=self.n_crit,
+            max_iterations=self.max_iterations,
+        )
         _configure_xfoil_output_for_path(
             xfoil,
             self._cache_file_path(airfoil, reynolds, mach),
@@ -668,6 +880,9 @@ class XfoilPolarProvider:
             new_polar=self.new_polar,
             timeout=self.timeout,
             cache_path=self._cache_file_path(airfoil, reynolds, mach),
+            alpha_step_deg=self.alpha_step_deg,
+            n_crit=self.n_crit,
+            max_iterations=self.max_iterations,
         )
 
     def _run_jobs(self, jobs: list[XfoilPolarJob]) -> Iterable[XfoilPolarJobResult]:
@@ -722,6 +937,10 @@ class XfoilPolarProvider:
                 self._safe_float_token(mach),
                 self._safe_float_token(self.alpha_min_deg),
                 self._safe_float_token(self.alpha_max_deg),
+                # Alpha resolution and transition model change the table itself,
+                # so they must not share a cache entry with a coarser run.
+                self._safe_float_token(self.alpha_step_deg),
+                self._safe_float_token(self.n_crit),
             ]
         )
         # XFOIL silently truncates long filename components on Windows.

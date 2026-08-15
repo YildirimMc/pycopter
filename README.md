@@ -53,10 +53,18 @@ from the shaft power.
 **Studies.** Twenty-plus built-in plots, including radial load distributions,
 stall margin against the loaded polar range, disk-loading and rotor-diameter
 sizing sweeps, headspeed sweeps, collective authority curves, payload/endurance
-trades, and coaxial interference versus rotor spacing.
+trades, and coaxial interference versus rotor spacing. The spacing sweep runs
+off the UI thread with live progress, an ETA, and a working cancel that leaves
+its partial curve behind.
 
-**Exports.** Plot PNG, summary CSV, blade-element load CSV, and JSON
-configurations that round-trip back into the UI.
+**Run manager.** Every calculation is a named, persisted run in the right-hand
+rail rather than a single mutable output. Pick a baseline and the metric strip
+and rail show every other run as a delta against it; check runs to overlay them
+on the current plot; a failed run shows its exception inline without clearing
+the previous result.
+
+**Exports.** Plot PNG, summary CSV, blade-element load CSV, the whole session's
+runs, and JSON configurations that round-trip back into the UI.
 
 ---
 
@@ -91,9 +99,9 @@ nothing extra is needed there. On Linux or macOS, supply your own `xfoil` build.
 **MPI:** XFOIL polar generation distributes independent runs across worker
 processes and expects an MPI runtime. On Windows install
 [Microsoft MPI](https://learn.microsoft.com/en-us/message-passing-interface/microsoft-mpi)
-(`msmpisetup.exe`). If you would rather not install it, open **XFOIL Polar
-Generation** in the dashboard and set **XFOIL Backend** to *Serial debug* —
-slower, but no MPI needed.
+(`msmpisetup.exe`). If you would rather not install it, open the **XFOIL** tab
+in the dashboard and set **Backend** to *Serial debug* — slower, but no MPI
+needed.
 
 ---
 
@@ -101,14 +109,20 @@ slower, but no MPI needed.
 
 The dashboard opens with a small electric drone rotor already filled in.
 
-1. **Initialize Rotor** — validates the geometry and reports tip speed, tip
-   Mach, disk area, and solidity.
-2. **Calculate Hover** — trims the rotor to the gross mass. The first run
-   generates XFOIL polars for the Reynolds/Mach bins the blade needs and caches
-   them, so it takes noticeably longer than later runs.
-3. Read the results in the **Plot**, **Summary**, and **Blade Element Loads**
-   tabs, and the run log along the bottom.
-4. Pick any entry from **Selected Plot** and press **Generate Plot**.
+1. Pick a subsystem from the icon rail on the left — **ROTOR**, **BLADE**,
+   **OPER**, **SOLVER**, **XFOIL**, **PROP** — and edit its fields. A field you
+   change away from the loaded configuration is outlined in the accent colour,
+   and the inspector header counts the edits.
+2. **SOLVE AS NEW RUN** trims the rotor to the gross mass and adds the result to
+   the run rail. The first run generates XFOIL polars for the Reynolds/Mach bins
+   the blade needs and caches them, so it takes noticeably longer than later
+   runs. The XFOIL tab shows the worker strip while it does.
+3. Read the metric strip across the top of the canvas, then the **PLOT**,
+   **SUMMARY**, **LOADS**, and **POLARS** tabs. The log strip along the bottom
+   drags upwards into a filtered terminal.
+4. Pick any entry from the plot picker and press **GENERATE**.
+5. Change something and solve again. The new run appears above the old one with
+   its power delta against the baseline; **SET BASELINE** moves the reference.
 
 A full walkthrough, including what every input means and how to read the
 outputs, is in **[docs/TUTORIAL.md](docs/TUTORIAL.md)**.
@@ -131,6 +145,10 @@ Three validation cases (Mil Mi-8, MD 500E, UH-60L) ship in
 | Summary metrics | Per-element blade loads |
 |---|---|
 | ![Summary table](docs/images/dashboard-summary.png) | ![Blade element load table](docs/images/dashboard-blade-loads.png) |
+
+| Polar bins behind the run | XFOIL workers and the expanded log |
+|---|---|
+| ![Polar bin provenance](docs/images/dashboard-polars.png) | ![XFOIL tab with the log expanded](docs/images/dashboard-xfoil-log.png) |
 
 ---
 
@@ -156,8 +174,10 @@ rotor's contracted wake.
 
 Because section data is looked up per station rather than assumed from a mean
 drag coefficient, results follow the airfoil, and stall shows up as a real
-excursion outside the loaded polar range — the dashboard warns when elements
-request an angle of attack it had to clamp.
+excursion outside the loaded polar range. The result carries the clamped-element
+count and any substituted polar bin as data, so the amber warning bar, the
+LOADS heatmap, and the POLARS tab all read from the same source instead of
+parsing log text.
 
 Every GUI input and output is mapped to its Python API endpoint, with units and
 ranges, in **[GUI.md](GUI.md)**.
@@ -212,7 +232,10 @@ src/pycopter/            Calculation core, GUI-independent
     xfoil.py             XFOIL process driver and airfoil coordinate handling
     utils.py             Interpolation, Reynolds, Wald, reference-area helpers
     pycopter.py          Legacy-compatible Rotor facade
-src/gui/                 Panel Web UI (app.py layout/plots, calculations.py wiring)
+src/gui/                 Panel Web UI
+    app.py               Shell, inspector, canvas, run rail, log, all plots
+    calculations.py      GUI config dicts onto the typed solver API
+    runs.py              Session run records and the delta baseline
 src/gui_old/             Legacy PyQt5 desktop GUI, kept for reference
 scripts/                 Screenshot capture for the docs
 tests/                   unittest suite, including headless browser checks

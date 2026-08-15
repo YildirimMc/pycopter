@@ -4,7 +4,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from pycopter import Rotor
-from pycopter.bemt import HoverSolver, solve_coaxial_hover
+from pycopter.bemt import HoverSolver, solve_coaxial_hover, sweep_interference_loss
 from pycopter.models import (
     BladeStation,
     CoaxialSpec,
@@ -13,6 +13,7 @@ from pycopter.models import (
     RotorSpec,
 )
 from pycopter.polars import LinearPolarProvider, XfoilPolarProvider
+from pycopter.xfoil import Xfoil
 
 
 class TestBemtHover(unittest.TestCase):
@@ -328,7 +329,7 @@ class TestXfoilProviderBounds(unittest.TestCase):
         class FakeXfoil:
             error_message = ""
 
-            def __init__(self, new_polar=True, timeout=60):
+            def __init__(self, new_polar=True, timeout=60, **kwargs):
                 self.new_polar = new_polar
                 self.timeout = timeout
 
@@ -357,7 +358,7 @@ class TestXfoilProviderBounds(unittest.TestCase):
         class FakeXfoil:
             error_message = ""
 
-            def __init__(self, new_polar=True, timeout=60):
+            def __init__(self, new_polar=True, timeout=60, **kwargs):
                 pass
 
             def simulate(self, airfoil, mach, reynolds, alpha_min_deg, alpha_max_deg):
@@ -383,7 +384,7 @@ class TestXfoilProviderBounds(unittest.TestCase):
         class FakeXfoil:
             error_message = ""
 
-            def __init__(self, new_polar=True, timeout=60):
+            def __init__(self, new_polar=True, timeout=60, **kwargs):
                 self.new_polar = new_polar
                 self.timeout = timeout
                 self.repo_root = Path.cwd()
@@ -421,7 +422,7 @@ class TestXfoilProviderBounds(unittest.TestCase):
         class FakeXfoil:
             error_message = ""
 
-            def __init__(self, new_polar=True, timeout=60):
+            def __init__(self, new_polar=True, timeout=60, **kwargs):
                 self.new_polar = new_polar
                 self.timeout = timeout
                 self.repo_root = Path.cwd()
@@ -457,7 +458,7 @@ class TestXfoilProviderBounds(unittest.TestCase):
         class FakeXfoil:
             error_message = ""
 
-            def __init__(self, new_polar=True, timeout=60):
+            def __init__(self, new_polar=True, timeout=60, **kwargs):
                 self.new_polar = new_polar
                 self.timeout = timeout
                 self.repo_root = Path.cwd()
@@ -493,7 +494,7 @@ class TestXfoilProviderBounds(unittest.TestCase):
         class FakeXfoil:
             error_message = ""
 
-            def __init__(self, new_polar=True, timeout=60):
+            def __init__(self, new_polar=True, timeout=60, **kwargs):
                 self.new_polar = new_polar
                 self.timeout = timeout
                 self.repo_root = Path.cwd()
@@ -638,6 +639,291 @@ class TestRealXfoilHover(unittest.TestCase):
         self.assertGreater(rotor.hover_power_total, 0.0)
         self.assertEqual(8, len(rotor.hover_result.element_loads))
         self.assertFalse(any(load.alpha_clamped for load in rotor.hover_result.element_loads))
+
+
+class TestElementSpacing(unittest.TestCase):
+    def setUp(self):
+        self.rotor = RotorSpec.from_uniform_blade(
+            airfoil="naca0012",
+            num_blades=2,
+            chord_m=0.035,
+            rotor_diameter_m=0.7,
+            headspeed_rpm=2500.0,
+            washout_deg=-6.0,
+            root_cutout_ratio=0.12,
+        )
+        self.provider = LinearPolarProvider(lift_slope_per_rad=5.7, cd0=0.012)
+        self.operating_point = OperatingPoint(target_thrust_N=9.81, trim_mode="target_thrust")
+
+    def test_uniform_spacing_is_still_the_default(self):
+        self.assertEqual("uniform", HoverSolverSettings().element_spacing)
+
+    def test_cosine_spacing_clusters_elements_at_the_root_and_the_tip(self):
+        settings = HoverSolverSettings(blade_element_count=20, element_spacing="cosine")
+        solver = HoverSolver(self.provider, settings)
+
+        result = solver.solve(self.rotor, self.operating_point)
+        widths = [load.dr_m for load in result.element_loads]
+
+        self.assertEqual(20, len(widths))
+        self.assertLess(widths[0], widths[len(widths) // 2])
+        self.assertLess(widths[-1], widths[len(widths) // 2])
+        self.assertAlmostEqual(
+            sum(widths),
+            self.rotor.radius_m - self.rotor.root_cutout_ratio * self.rotor.radius_m,
+            places=6,
+        )
+
+    def test_cosine_spacing_reaches_the_same_trim_as_uniform(self):
+        results = {}
+        for spacing in ("uniform", "cosine"):
+            solver = HoverSolver(
+                self.provider,
+                HoverSolverSettings(blade_element_count=60, element_spacing=spacing),
+            )
+            results[spacing] = solver.solve(self.rotor, self.operating_point)
+
+        self.assertAlmostEqual(
+            results["uniform"].total_thrust_N, results["cosine"].total_thrust_N, delta=0.05
+        )
+        self.assertAlmostEqual(
+            results["uniform"].power_W, results["cosine"].power_W, delta=1.0
+        )
+
+    def test_invalid_spacing_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "element_spacing"):
+            HoverSolverSettings(element_spacing="linear")
+
+
+class TestInterferenceSweep(unittest.TestCase):
+    def setUp(self):
+        upper = RotorSpec.from_uniform_blade(
+            airfoil="naca0012",
+            num_blades=2,
+            chord_m=0.035,
+            rotor_diameter_m=0.7,
+            headspeed_rpm=2500.0,
+            washout_deg=-6.0,
+            root_cutout_ratio=0.12,
+            name="upper",
+        )
+        lower = RotorSpec.from_uniform_blade(
+            airfoil="naca0012",
+            num_blades=2,
+            chord_m=0.035,
+            rotor_diameter_m=0.7,
+            headspeed_rpm=2500.0,
+            washout_deg=-6.0,
+            root_cutout_ratio=0.12,
+            name="lower",
+            rotation_direction=-1,
+        )
+        self.spec = CoaxialSpec(
+            upper_rotor=upper, lower_rotor=lower, trim_mode="equal_thrust"
+        )
+        self.operating_point = OperatingPoint(gross_mass_kg=1.0, trim_mode="target_thrust")
+        self.settings = HoverSolverSettings(blade_element_count=8)
+        self.provider = LinearPolarProvider(lift_slope_per_rad=5.7, cd0=0.012)
+
+    def test_sweep_reports_progress_for_every_point(self):
+        seen = []
+
+        sweep = sweep_interference_loss(
+            self.spec,
+            self.operating_point,
+            [0.1, 0.3, 0.5],
+            polar_provider=self.provider,
+            settings=self.settings,
+            progress=lambda index, total, spacing, point: seen.append((index, total, spacing)),
+        )
+
+        self.assertEqual(3, len(sweep.points))
+        self.assertEqual(3, len(sweep.solved_points))
+        self.assertFalse(sweep.cancelled)
+        self.assertEqual([(1, 3, 0.1), (2, 3, 0.3), (3, 3, 0.5)], seen)
+        self.assertEqual([0.1, 0.3, 0.5], [point.z_over_R for point in sweep.points])
+
+    def test_sweep_uses_the_swept_spacing_for_each_point(self):
+        sweep = sweep_interference_loss(
+            self.spec,
+            self.operating_point,
+            [0.1, 1.2],
+            polar_provider=self.provider,
+            settings=self.settings,
+        )
+
+        losses = [point.result.interference_loss_ratio for point in sweep.solved_points]
+        self.assertNotAlmostEqual(losses[0], losses[1], places=4)
+
+    def test_cancelling_returns_the_points_solved_so_far(self):
+        solved = []
+
+        sweep = sweep_interference_loss(
+            self.spec,
+            self.operating_point,
+            [0.1, 0.3, 0.5, 0.7],
+            polar_provider=self.provider,
+            settings=self.settings,
+            progress=lambda index, total, spacing, point: solved.append(index),
+            cancel=lambda: len(solved) >= 2,
+        )
+
+        self.assertTrue(sweep.cancelled)
+        self.assertEqual(2, len(sweep.points))
+        self.assertEqual(4, sweep.requested_points)
+        self.assertEqual(2, len(sweep.solved_points))
+
+    def test_a_failed_point_is_recorded_without_aborting_the_sweep(self):
+        real_solve = sweep_interference_loss.__globals__["solve_coaxial_hover"]
+        calls = {"count": 0}
+
+        def flaky(*args, **kwargs):
+            calls["count"] += 1
+            if calls["count"] == 2:
+                raise RuntimeError("did not converge")
+            return real_solve(*args, **kwargs)
+
+        with patch("pycopter.bemt.solve_coaxial_hover", side_effect=flaky):
+            sweep = sweep_interference_loss(
+                self.spec,
+                self.operating_point,
+                [0.1, 0.3, 0.5],
+                polar_provider=self.provider,
+                settings=self.settings,
+            )
+
+        self.assertEqual(3, len(sweep.points))
+        self.assertEqual(2, len(sweep.solved_points))
+        self.assertEqual(1, len(sweep.failed_points))
+        self.assertIn("did not converge", sweep.failed_points[0].error)
+
+
+class TestPolarBinProvenance(unittest.TestCase):
+    def _fake_xfoil(self, generated):
+        class FakeXfoil:
+            error_message = ""
+
+            def __init__(self, new_polar=True, timeout=60, **kwargs):
+                self.new_polar = new_polar
+                self.repo_root = Path.cwd()
+                self.output_path = self.repo_root / "polar.txt"
+                self.output_path_for_xfoil = "polar.txt"
+
+            def simulate(self, airfoil, mach, reynolds, alpha_min_deg, alpha_max_deg):
+                generated.append((airfoil, reynolds, mach))
+                self.output_path.parent.mkdir(parents=True, exist_ok=True)
+                self.output_path.write_text(
+                    "\n" * 12 + "-8 -0.8 0.04 0 0\n0 0.0 0.01 0 0\n15 1.0 0.05 0 0\n",
+                    encoding="utf-8",
+                )
+                return True
+
+            def read_polar(self):
+                import numpy as np
+
+                return np.genfromtxt(self.output_path, skip_header=12)
+
+        return FakeXfoil
+
+    def test_generated_and_cached_bins_are_reported_separately(self):
+        generated = []
+        with TemporaryDirectory() as tempdir:
+            with patch("pycopter.polars.Xfoil", self._fake_xfoil(generated)):
+                provider = XfoilPolarProvider(cache_directory=tempdir)
+                provider.get_coefficients("naca0012", 5.0, 100000.0, 0.1)
+                report = provider.polar_bin_report()
+
+                self.assertEqual(1, len(report))
+                self.assertEqual("generated", report[0]["status"])
+                self.assertEqual(1, report[0]["lookups"])
+                self.assertEqual(1, provider.cache_bin_count())
+                self.assertEqual(1, provider.cache_file_count())
+
+                reader = XfoilPolarProvider(cache_directory=tempdir)
+                reader.get_coefficients("naca0012", 5.0, 100000.0, 0.1)
+
+                self.assertEqual("cache", reader.polar_bin_report()[0]["status"])
+
+    def test_out_of_range_requests_are_flagged_as_substituted(self):
+        generated = []
+        with TemporaryDirectory() as tempdir:
+            with patch("pycopter.polars.Xfoil", self._fake_xfoil(generated)):
+                provider = XfoilPolarProvider(
+                    cache_directory=tempdir, max_reynolds=500000.0, max_mach=0.4
+                )
+                provider.get_coefficients("naca0012", 5.0, 2_000_000.0, 0.9)
+
+        report = provider.polar_bin_report()
+        self.assertEqual(1, len(report))
+        self.assertTrue(report[0]["substituted"])
+        self.assertEqual("substituted", report[0]["status"])
+        self.assertEqual("generated", report[0]["source"])
+
+    def test_in_range_binning_is_not_a_substitution(self):
+        generated = []
+        with TemporaryDirectory() as tempdir:
+            with patch("pycopter.polars.Xfoil", self._fake_xfoil(generated)):
+                provider = XfoilPolarProvider(cache_directory=tempdir)
+                # 137,000 rounds into the 100,000-wide Re bin; that is the
+                # documented binning scheme, not a substituted condition.
+                provider.get_coefficients("naca0012", 5.0, 137000.0, 0.12)
+
+        self.assertFalse(provider.polar_bin_report()[0]["substituted"])
+
+    def test_substituted_bins_reach_the_hover_result(self):
+        generated = []
+        with TemporaryDirectory() as tempdir:
+            with patch("pycopter.polars.Xfoil", self._fake_xfoil(generated)):
+                provider = XfoilPolarProvider(
+                    cache_directory=tempdir, max_reynolds=1000.0, max_mach=0.01
+                )
+                rotor = RotorSpec.from_uniform_blade(
+                    airfoil="naca0012",
+                    num_blades=2,
+                    chord_m=0.035,
+                    rotor_diameter_m=0.7,
+                    headspeed_rpm=2500.0,
+                    root_cutout_ratio=0.12,
+                )
+                solver = HoverSolver(provider, HoverSolverSettings(blade_element_count=6))
+                result = solver.solve_fixed_collective(
+                    rotor, OperatingPoint(trim_mode="fixed_collective"), 6.0
+                )
+
+        self.assertTrue(result.substituted_polar_bins)
+        self.assertTrue(
+            any("substituted polar bin" in warning for warning in result.warnings)
+        )
+
+
+class TestXfoilSweepSettings(unittest.TestCase):
+    def test_alpha_step_controls_the_generated_sweep(self):
+        xfoil = Xfoil(alpha_step_deg=0.5)
+
+        points = xfoil.alpha_points(-3.0, -1.0)
+
+        self.assertEqual([-3.0, -2.5, -2.0, -1.5, -1.0], points)
+
+    def test_alpha_sweep_never_exceeds_the_xfoil_ceiling(self):
+        xfoil = Xfoil(alpha_step_deg=4.0)
+
+        points = xfoil.alpha_points(0.0, 25.0)
+
+        self.assertLessEqual(max(points), 18.0)
+        self.assertEqual(0.0, points[0])
+
+    def test_alpha_step_and_n_crit_change_the_cache_key(self):
+        with TemporaryDirectory() as tempdir:
+            coarse = XfoilPolarProvider(cache_directory=tempdir, alpha_step_deg=1.0)
+            fine = XfoilPolarProvider(cache_directory=tempdir, alpha_step_deg=0.25)
+            turbulent = XfoilPolarProvider(cache_directory=tempdir, n_crit=4.0)
+
+            paths = {
+                provider._cache_file_path("naca0012", 100000.0, 0.1)
+                for provider in (coarse, fine, turbulent)
+            }
+
+        self.assertEqual(3, len(paths))
 
 
 if __name__ == "__main__":
