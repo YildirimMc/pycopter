@@ -1,5 +1,4 @@
 import numpy as np
-from scipy.interpolate import interp1d
 from PIL import Image
 import sys
 
@@ -23,7 +22,7 @@ def find_interval_idx(array, val):
         return idx
 
 def interpolate(val, x1, x2, y1, y2):
-    # Deprecated. Using scipy in the future.
+    # Deprecated. Use Polar.get_polar() for polar lookups.
     """2D interpolation."""
     slope = (y2 - y1) / (x2 - x1)
     return (val - x1) * slope + y1
@@ -94,9 +93,21 @@ class Polar():
                 self.polar = xfoil.read_polar()
 
     def get_polar(self, alfa):
-        """Returns (cl, cd) values for the requested angle of attack in degrees."""
-        func = interp1d(self.polar[:,0], [self.polar[:,1], self.polar[:,2]], kind='linear', axis=1)
-        cl, cd = func(alfa)
+        """Returns (cl, cd) values for the requested angle of attack in degrees.
+
+        Linear interpolation over the stored polar. Angles outside the tabulated
+        alfa range raise ValueError rather than clamping, so an out-of-range
+        request is never silently answered with an endpoint value.
+        """
+        order = np.argsort(self.polar[:,0])
+        alfas = self.polar[order,0]
+        if np.min(alfa) < alfas[0] or np.max(alfa) > alfas[-1]:
+            raise ValueError(
+                f"Angle of attack {alfa} deg is outside the tabulated polar range "
+                f"[{alfas[0]:.3f}, {alfas[-1]:.3f}] deg."
+            )
+        cl = np.interp(alfa, alfas, self.polar[order,1])
+        cd = np.interp(alfa, alfas, self.polar[order,2])
         return cl, cd
     
     def get_cl_slope(self):

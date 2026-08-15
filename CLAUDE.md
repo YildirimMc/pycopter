@@ -1,8 +1,8 @@
 # Project Instructions
 
 ## Tech Stack
-- Python application using a `src/` layout. Dependencies are pinned by range in `requirements.txt` (runtime) and `requirements-dev.txt` (Playwright, plus PyQt5 for the legacy GUI). There is still no packaging scaffolding, and none is wanted.
-- Runtime dependencies: panel, matplotlib, numpy, pandas, scipy, Pillow, and mpi4py. PyQt5 is needed only by the legacy desktop GUI.
+- Python application using a `src/` layout. Dependencies are pinned by range in `requirements.txt` (runtime) and `requirements-dev.txt` (Playwright only). There is still no packaging scaffolding, and none is wanted.
+- Runtime dependencies: panel, matplotlib, numpy, pandas, Pillow, and mpi4py. Keep the dependency list this short on purpose: scipy was dropped because its only use was one `interp1d` call, and PyQt5 is not a declared dev dependency because it is a ~140 MB Qt runtime needed only by the legacy desktop GUI. Install PyQt5 on demand to run `src/main.py`.
 - Core app domains are rotorcraft performance modeling, XFOIL polar generation, GUI wiring, and plots.
 - The checked-in XFOIL executable is Windows-specific and lives under `data/XFOIL6.99/`.
 - The project is meant to be clone-and-run: `start_webui.bat` provisions `.venv` from `requirements.txt` on first run. Keep that path working when changing dependencies or entry points.
@@ -34,7 +34,8 @@
   `$env:PYTHONPATH='src'; .venv\Scripts\python.exe -m unittest discover -v`
 - A syntax-only check that does not require third-party packages is:
   `python -m compileall -q src tests`
-- Browser tests need `playwright` plus `python -m playwright install chromium`. They skip themselves when it is missing, so a missing browser must never be read as a passing layout.
+- Browser tests need `playwright` plus `python -m playwright install --only-shell`. They skip themselves when it is missing, so a missing browser must never be read as a passing layout.
+- Headless launches go through `channel="chromium-headless-shell"` (`HEADLESS_CHANNEL` in `tests/test_web_gui_browser.py`, and the same literal in `scripts/capture_screenshots.py`). Playwright has no fallback from the `chromium` executable to the shell, so dropping the channel silently reintroduces the full ~410 MB chromium download as a requirement.
 - There is no `pyproject.toml`, `tox.ini`, or `Makefile`, and none is wanted.
 
 ## Build & Run
@@ -45,7 +46,7 @@
 - Start the Web UI from the repo root (`webui.py` puts `src/` on `sys.path` itself):
   `.venv\Scripts\python.exe webui.py`
 - Do not install packages unless the current task explicitly calls for dependency setup.
-- The legacy PyQt GUI still runs with `PYTHONPATH=src` set once PyQt5 is installed:
+- The legacy PyQt GUI still runs with `PYTHONPATH=src` set, once PyQt5 is installed by hand (`pip install "PyQt5>=5.15,<6"`; it is not in either requirements file):
   `python src/main.py`
 - Regenerate README screenshots after UI changes:
   `PYTHONPATH=src .venv\Scripts\python.exe scripts/capture_screenshots.py`

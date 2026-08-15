@@ -13,6 +13,14 @@ def _free_port():
         return sock.getsockname()[1]
 
 
+# These checks only ever run headless, so they launch chromium-headless-shell
+# instead of the full chromium build that would otherwise have to be downloaded
+# alongside it. Playwright does not fall back from one to the other: this
+# channel is what makes "playwright install --only-shell" sufficient, and the
+# tests skip themselves when it is absent.
+HEADLESS_CHANNEL = "chromium-headless-shell"
+
+
 # Panel renders every component into its own shadow root, so the dashboard
 # regions are invisible to a plain document.querySelector.
 DEEP_ALL_HELPER = """
@@ -115,7 +123,9 @@ class TestWebGuiBrowserRender(unittest.TestCase):
         try:
             with sync_playwright() as playwright:
                 try:
-                    browser = playwright.chromium.launch(headless=True)
+                    browser = playwright.chromium.launch(
+                        headless=True, channel=HEADLESS_CHANNEL
+                    )
                 except PlaywrightError as err:
                     self.skipTest(f"Playwright Chromium is unavailable: {err}")
 
@@ -178,7 +188,9 @@ class TestWebGuiBrowserRender(unittest.TestCase):
         try:
             with sync_playwright() as playwright:
                 try:
-                    browser = playwright.chromium.launch(headless=True)
+                    browser = playwright.chromium.launch(
+                        headless=True, channel=HEADLESS_CHANNEL
+                    )
                 except PlaywrightError as err:
                     self.skipTest(f"Playwright Chromium is unavailable: {err}")
 
@@ -249,7 +261,9 @@ class TestWebGuiBrowserRender(unittest.TestCase):
         try:
             with sync_playwright() as playwright:
                 try:
-                    browser = playwright.chromium.launch(headless=True)
+                    browser = playwright.chromium.launch(
+                        headless=True, channel=HEADLESS_CHANNEL
+                    )
                 except PlaywrightError as err:
                     self.skipTest(f"Playwright Chromium is unavailable: {err}")
 
@@ -296,7 +310,9 @@ class TestWebGuiBrowserRender(unittest.TestCase):
         try:
             with sync_playwright() as playwright:
                 try:
-                    browser = playwright.chromium.launch(headless=True)
+                    browser = playwright.chromium.launch(
+                        headless=True, channel=HEADLESS_CHANNEL
+                    )
                 except PlaywrightError as err:
                     self.skipTest(f"Playwright Chromium is unavailable: {err}")
 

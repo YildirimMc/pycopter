@@ -9,7 +9,6 @@ panel>=1.9,<2
 matplotlib>=3.8,<4
 numpy>=1.26,<3
 pandas>=2.1,<4
-scipy>=1.11,<2
 pillow>=10,<14
 
 # XFOIL polar generation distributes independent runs over MPI workers.

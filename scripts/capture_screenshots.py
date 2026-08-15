@@ -6,7 +6,7 @@ PNG per view under ``docs/images``. Regenerate after UI changes with:
     python scripts/capture_screenshots.py
 
 Requires the development extras (``playwright`` plus ``playwright install
-chromium``). XFOIL polar generation runs on the first pass, so the initial
+--only-shell``). XFOIL polar generation runs on the first pass, so the initial
 capture takes a few minutes; later runs reuse the cached polars.
 """
 
@@ -142,7 +142,12 @@ def main() -> int:
 
     try:
         with sync_playwright() as playwright:
-            browser = playwright.chromium.launch(headless=True)
+            # chromium-headless-shell, matching the browser tests, so a
+            # "playwright install --only-shell" checkout can regenerate the
+            # screenshots without the full chromium download.
+            browser = playwright.chromium.launch(
+                headless=True, channel="chromium-headless-shell"
+            )
             # Scale factor 1 keeps the committed PNGs small; 1920 px wide is
             # already more than GitHub renders a README image at.
             page = browser.new_page(viewport=VIEWPORT, device_scale_factor=1)

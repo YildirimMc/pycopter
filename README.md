@@ -250,8 +250,12 @@ docs/                    Tutorial and images
 
 ```bash
 .venv/Scripts/python.exe -m pip install -r requirements-dev.txt
-.venv/Scripts/python.exe -m playwright install chromium
+.venv/Scripts/python.exe -m playwright install --only-shell
 ```
+
+`--only-shell` fetches just `chromium-headless-shell`, which is all the headless
+checks need. Plain `playwright install chromium` also downloads the full
+~410 MB browser build that nothing here launches.
 
 Run the suite:
 
@@ -276,8 +280,10 @@ Regenerate the README screenshots after UI changes:
 PYTHONPATH=src .venv/Scripts/python.exe scripts/capture_screenshots.py
 ```
 
-The legacy PyQt desktop GUI still runs via `python src/main.py` once `PyQt5` is
-installed, but the Web UI is the supported interface and gets all new work.
+The legacy PyQt desktop GUI still runs via `python src/main.py`, but `PyQt5` is
+deliberately not in `requirements-dev.txt`: it is a ~140 MB Qt runtime for a GUI
+that gets no new work. Install it on demand with
+`pip install "PyQt5>=5.15,<6"`. The Web UI is the supported interface.
 
 ---
 

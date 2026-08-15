@@ -1,15 +1,22 @@
 # Development and test dependencies, on top of requirements.txt.
 #     .venv\Scripts\python.exe -m pip install -r requirements-dev.txt
-#     .venv\Scripts\python.exe -m playwright install chromium
+#     .venv\Scripts\python.exe -m playwright install --only-shell
 #
 # Playwright drives the headless browser checks in
 # tests/test_web_gui_browser.py and scripts/capture_screenshots.py. Those tests
 # skip themselves when it is missing, so the rest of the suite still runs.
+#
+# "--only-shell" fetches just chromium-headless-shell (~270 MB) instead of the
+# full chromium build (~410 MB on top of it). Both callers launch with
+# channel="chromium-headless-shell"; Playwright does not fall back from the
+# chromium executable to the shell, so keep the channel and the install flag in
+# sync if either changes.
 
 -r requirements.txt
 
-playwright>=1.40
+playwright>=1.49
 
-# Only needed to run the legacy PyQt desktop GUI in src/gui_old via src/main.py.
-# The supported interface is the Web UI; see README.md.
-PyQt5>=5.15,<6
+# PyQt5 is NOT listed here. It is a ~140 MB Qt runtime needed only by the legacy
+# desktop GUI in src/gui_old (via src/main.py), which is kept for reference and
+# gets no new work. Install it on demand if you need to run that GUI:
+#     .venv\Scripts\python.exe -m pip install "PyQt5>=5.15,<6"
