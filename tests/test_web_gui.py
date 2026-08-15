@@ -407,5 +407,102 @@ class TestWebGuiApp(unittest.TestCase):
         self.assertIn("pitch_moment_Nm", loads)
 
 
+class TestPlotAxisLayout(unittest.TestCase):
+    """The axis rules that keep multi-quantity plots readable.
+
+    Quantities within SHARED_AXIS_MAX_RATIO share one y-axis, larger gaps take
+    the right-hand axis, and a third scale moves to its own stacked panel
+    rather than a third offset spine.
+    """
+
+    def setUp(self):
+        import numpy as np
+
+        self.np = np
+        self.app = PycopterWebApp.__new__(PycopterWebApp)
+        self.radius = np.linspace(0.12, 1.0, 60)
+
+    def test_similar_magnitudes_share_one_axis(self):
+        induced_velocity = 3.6 * self.np.sqrt(self.radius)
+        loss_factor = 1.0 - 0.6 * self.radius**8
+
+        layout = self.app._axis_layout([induced_velocity, loss_factor])
+
+        self.assertEqual([(0, 0), (0, 0)], layout)
+
+    def test_dissimilar_magnitudes_use_the_second_axis(self):
+        element_thrust = 0.13 * self.np.sin(self.radius * 3)
+        element_torque = 0.004 * self.radius**2
+
+        layout = self.app._axis_layout([element_thrust, element_torque])
+
+        self.assertEqual([(0, 0), (0, 1)], layout)
+
+    def test_third_scale_moves_to_its_own_panel(self):
+        alpha = 3.8 * self.np.sin(self.radius * 3)
+        reynolds = 2.1e5 * self.radius
+        mach = 0.265 * self.radius
+
+        layout = self.app._axis_layout([alpha, reynolds, mach])
+
+        # alpha and Reynolds share a panel; Mach cannot fit either scale.
+        self.assertEqual([(0, 0), (0, 1), (1, 0)], layout)
+        self.assertEqual(2, max(panel for panel, _ in layout) + 1)
+
+    def test_identically_shaped_curves_never_face_each_other(self):
+        """Two curves of the same shape on opposite axes hide one another.
+
+        Reynolds and Mach are both linear in radius, so after each axis
+        autoscales they draw exactly the same line.
+        """
+        reynolds = 2.1e5 * self.radius
+        mach = 0.265 * self.radius
+        self.assertTrue(self.app._shapes_coincide(reynolds, mach))
+
+        layout = self.app._axis_layout([reynolds, mach])
+
+        self.assertNotEqual(layout[0][0], layout[1][0], "coincident curves shared a panel")
+
+    def test_matching_scales_but_different_shapes_may_face_each_other(self):
+        rising = 0.13 * self.radius
+        humped = 0.004 * self.np.sin(self.radius * 3)
+        self.assertFalse(self.app._shapes_coincide(rising, humped))
+
+        layout = self.app._axis_layout([rising, humped])
+
+        self.assertEqual([(0, 0), (0, 1)], layout)
+
+    def test_flat_series_joins_an_existing_axis_instead_of_forcing_a_panel(self):
+        """An all-zero Cm has no scale of its own, so it must not add a panel."""
+        cl = 0.42 * self.np.sin(self.radius * 3)
+        cd = 0.0117 * (1.0 + self.radius * 0.1)
+        cm = self.np.zeros_like(self.radius)
+
+        layout = self.app._axis_layout([cl, cd, cm])
+
+        self.assertEqual(1, max(panel for panel, _ in layout) + 1)
+
+    def test_no_plot_uses_more_than_two_axes_per_panel(self):
+        import matplotlib
+
+        matplotlib.use("Agg")
+        app = PycopterWebApp()
+        app.current_case = run_hover_case(
+            DEFAULT_CONFIG, DEFAULT_STATION_ROWS, polar_provider=LinearPolarProvider()
+        )
+
+        for plot_name in ("Radial Loads", "Alpha, Re, Mach vs Radius",
+                          "Section Coefficients vs Radius", "Induced Velocity and Loss",
+                          "Cumulative Thrust and Power"):
+            with self.subTest(plot=plot_name):
+                app.plot_select.options = [plot_name]
+                app.plot_select.value = plot_name
+                app._generate_plot()
+                figure = app.plot_fig
+                panels = [ax for ax in figure.axes if not getattr(ax, "_pycopter_twin", False)]
+                twins = [ax for ax in figure.axes if getattr(ax, "_pycopter_twin", False)]
+                self.assertLessEqual(len(twins), len(panels), f"{plot_name} has a third y-axis")
+
+
 if __name__ == "__main__":
     unittest.main()

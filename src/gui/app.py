@@ -82,14 +82,23 @@ COAXIAL_SPACING_SWEEP_MAX = 1.50
 DESIGN_SWEEP_POINTS = 17
 CONTROL_SWEEP_POINTS = 31
 MIN_SWEEP_GROSS_MASS_KG = 0.05
-# Outward offset in points for a third y-axis, so its spine clears the second.
-AXIS_OFFSET_POINTS = 58
+# Axis layout rules for multi-quantity plots, applied to the measured data:
+#
+# 1. Two quantities share a y-axis when their magnitudes are within this factor,
+#    so the smaller one still spans at least a fifth of the axis.
+# 2. Beyond that they get the left and right y-axis of the same panel.
+# 3. A third, differently scaled quantity moves to its own stacked panel rather
+#    than a third offset spine, which is hard to read.
+SHARED_AXIS_MAX_RATIO = 5.0
+MAX_PLOT_PANELS = 3
+# Two curves on opposite autoscaled axes draw on top of each other when their
+# shapes match; Reynolds and Mach are both linear in radius and coincide
+# exactly. Such a pair is split across panels instead, because a single visible
+# line silently hiding a second quantity is worse than an extra panel.
+COINCIDENT_SHAPE_GAP = 0.03
 # One colour per plotted quantity. Rotors are separated by line style instead,
 # so a quantity keeps its colour whether the case is single or coaxial.
 SERIES_COLORS = ("#4db6ac", "#e08a4f", "#9d8df1", "#77b6ea")
-# Sparse per-quantity markers keep curves apart when their shapes coincide.
-# Reynolds and Mach, for example, are both linear in radius, so on separate
-# axes they plot as the same line and colour alone would not separate them.
 SERIES_MARKERS = ("o", "s", "^", "D")
 SERIES_MARKER_COUNT = 9
 THEME = {
@@ -2442,19 +2451,94 @@ class PycopterWebApp:
         ax._pycopter_accent_side = side
         return ax
 
-    def _twin_axis(self, ax, color: str, outward_points: float = 0.0):
+    def _twin_axis(self, ax, color: str):
         """Add a right-hand y-axis that shares x with ``ax``.
 
-        Quantities of different units or magnitudes each get their own axis, so
-        a small one is not flattened onto the scale of a large one.
+        Used when a quantity is too large or too small to read on the left
+        axis. A panel never gets more than these two axes.
         """
         twin = ax.twinx()
         twin._pycopter_twin = True
         self._accent_axis(twin, color, side="right")
-        if outward_points:
-            twin.spines["right"].set_position(("outward", outward_points))
-            twin.spines["right"].set_visible(True)
         return twin
+
+    def _series_magnitude(self, values) -> float:
+        finite = np.asarray(values, dtype=float)
+        finite = finite[np.isfinite(finite)]
+        if finite.size == 0:
+            return 0.0
+        return float(np.max(np.abs(finite)))
+
+    def _normalized_shape(self, values):
+        """Scale a series onto 0..1, which is what an autoscaled axis shows."""
+        finite = np.asarray(values, dtype=float)
+        if finite.size == 0 or not np.isfinite(finite).any():
+            return None
+        low = float(np.nanmin(finite))
+        high = float(np.nanmax(finite))
+        if high - low <= 0.0:
+            return None
+        return (finite - low) / (high - low)
+
+    def _shapes_coincide(self, first, second) -> bool:
+        """True when two curves would overlap once each axis autoscales."""
+        left = self._normalized_shape(first)
+        right = self._normalized_shape(second)
+        if left is None or right is None or left.size != right.size:
+            return False
+        return float(np.nanmax(np.abs(left - right))) < COINCIDENT_SHAPE_GAP
+
+    def _axis_layout(self, series_values: list) -> list[tuple[int, int]]:
+        """Assign each series to a (panel, axis) slot from its measured data.
+
+        Returns one ``(panel_index, axis_index)`` per series, where axis 0 is a
+        panel's left y-axis and axis 1 its right. Implements the three rules
+        documented on SHARED_AXIS_MAX_RATIO.
+        """
+        magnitudes = [self._series_magnitude(values) for values in series_values]
+        # panels[panel][axis] = list of series indices already placed there
+        panels: list[list[list[int]]] = [[[0]]]
+        placement = [(0, 0)]
+
+        for index in range(1, len(series_values)):
+            panel_index = len(panels) - 1
+            panel = panels[panel_index]
+            slot = None
+
+            for axis_index, members in enumerate(panel):
+                # A flat or all-zero series carries no scale of its own, so it
+                # can join any axis rather than forcing a new panel.
+                if magnitudes[index] == 0.0:
+                    slot = (panel_index, axis_index)
+                    break
+                ratios = [
+                    max(magnitudes[index], magnitudes[member])
+                    / min(magnitudes[index], magnitudes[member])
+                    for member in members
+                    if magnitudes[member] > 0.0
+                ]
+                if ratios and max(ratios) <= SHARED_AXIS_MAX_RATIO:
+                    slot = (panel_index, axis_index)
+                    break
+
+            if slot is None and len(panel) == 1:
+                opposite = [series_values[member] for member in panel[0]]
+                if not any(self._shapes_coincide(series_values[index], other) for other in opposite):
+                    panel.append([])
+                    slot = (panel_index, 1)
+
+            if slot is None and len(panels) < MAX_PLOT_PANELS:
+                panels.append([[]])
+                slot = (len(panels) - 1, 0)
+
+            if slot is None:
+                # Out of panels: fall back to the least crowded axis available.
+                slot = (len(panels) - 1, len(panels[-1]) - 1)
+
+            panels[slot[0]][slot[1]].append(index)
+            placement.append(slot)
+
+        return placement
 
     def _rotor_linestyle(self, index: int) -> str:
         return ("-", "--", ":")[index % 3]
@@ -2471,51 +2555,93 @@ class PycopterWebApp:
             primary_ax.legend(handles, labels, loc=loc, fontsize=9)
 
     def _plot_element_series(self, case: HoverCase, series, title: str):
-        """Plot per-element quantities against r/R, one y-axis per quantity.
+        """Plot per-element quantities against r/R with a data-driven axis layout.
 
         ``series`` is a sequence of ``(column, axis_label, legend_label)``,
         where ``column`` is either a load-table column name or a callable that
-        derives a series from the load-table frame. Colour identifies the
-        quantity and line style identifies the rotor, so a coaxial case keeps
-        the same colour coding as a single rotor.
+        derives a series from the load-table frame. Quantities within
+        SHARED_AXIS_MAX_RATIO of each other share an axis, the rest take the
+        right-hand axis, and anything that still does not fit gets its own
+        stacked panel. Colour identifies the quantity and line style the rotor,
+        so a coaxial case keeps the same coding as a single rotor.
         """
-        fig, base_ax = plt.subplots(figsize=self._figure_size())
-        colors = [SERIES_COLORS[index % len(SERIES_COLORS)] for index in range(len(series))]
-        axes = [self._accent_axis(base_ax, colors[0])]
-        for index in range(1, len(series)):
-            axes.append(
-                self._twin_axis(base_ax, colors[index], outward_points=AXIS_OFFSET_POINTS * (index - 1))
-            )
-
         rotors = list(self._iter_hover_results(case))
+        frames = [pd.DataFrame(load_rows_for_result(hover)) for _, hover in rotors]
+        colors = [SERIES_COLORS[index % len(SERIES_COLORS)] for index in range(len(series))]
+
+        def values_for(frame, column):
+            return np.asarray(column(frame) if callable(column) else frame[column], dtype=float)
+
+        # Lay the axes out from every rotor's data at once, so a coaxial case
+        # and a single-rotor case of the same design agree on the layout.
+        combined = [
+            np.concatenate([values_for(frame, column) for frame in frames])
+            for column, _, _ in series
+        ]
+        placement = self._axis_layout(combined)
+        panel_count = max(panel for panel, _ in placement) + 1
+
+        # The first panel carries up to two quantities and their legend, so it
+        # gets the larger share of the figure height.
+        height_ratios = [1.5] + [1.0] * (panel_count - 1)
+        fig, panel_axes = plt.subplots(
+            panel_count,
+            1,
+            figsize=self._figure_size(),
+            sharex=True,
+            squeeze=False,
+            gridspec_kw={"height_ratios": height_ratios},
+        )
+        panel_axes = [row[0] for row in panel_axes]
+
+        # Build only the axes the layout actually asked for.
+        axes: dict[tuple[int, int], Any] = {}
+        for series_index, (panel, axis_index) in enumerate(placement):
+            if (panel, axis_index) in axes:
+                continue
+            if axis_index == 0:
+                axes[(panel, axis_index)] = panel_axes[panel]
+            else:
+                axes[(panel, axis_index)] = self._twin_axis(panel_axes[panel], colors[series_index])
+
+        # An axis carrying exactly one quantity is tinted to match its curve;
+        # a shared axis stays neutral and relies on the legend.
+        owners: dict[tuple[int, int], list[int]] = {}
+        for series_index, slot in enumerate(placement):
+            owners.setdefault(slot, []).append(series_index)
+        for slot, members in owners.items():
+            if len(members) == 1:
+                self._accent_axis(axes[slot], colors[members[0]], side="right" if slot[1] else "left")
+
         marker_slots = max(1, len(series) * len(rotors))
-        for rotor_index, (rotor_label, hover) in enumerate(rotors):
-            rows = pd.DataFrame(load_rows_for_result(hover))
+        for rotor_index, ((rotor_label, _), frame) in enumerate(zip(rotors, frames)):
             linestyle = self._rotor_linestyle(rotor_index)
             prefix = f"{rotor_label} " if len(rotors) > 1 else ""
-            marker_step = max(1, len(rows) // SERIES_MARKER_COUNT)
-            for index, (ax, color, (column, _, legend_label)) in enumerate(zip(axes, colors, series)):
-                values = column(rows) if callable(column) else rows[column]
-                # Stagger each curve's markers along the span so quantities that
-                # trace the same shape, such as Reynolds and Mach, stay legible.
-                slot = index * len(rotors) + rotor_index
+            marker_step = max(1, len(frame) // SERIES_MARKER_COUNT)
+            for series_index, (column, _, legend_label) in enumerate(series):
+                ax = axes[placement[series_index]]
+                # Stagger markers so curves that share an axis stay separable
+                # where they run close together.
+                slot = series_index * len(rotors) + rotor_index
                 ax.plot(
-                    rows["r_over_R"],
-                    values,
-                    color=color,
+                    frame["r_over_R"],
+                    values_for(frame, column),
+                    color=colors[series_index],
                     linestyle=linestyle,
-                    marker=SERIES_MARKERS[index % len(SERIES_MARKERS)],
+                    marker=SERIES_MARKERS[series_index % len(SERIES_MARKERS)],
                     markersize=4.5,
                     markevery=((slot * marker_step) // marker_slots, marker_step),
                     label=f"{prefix}{legend_label}",
                 )
 
-        for ax, (_, axis_label, _) in zip(axes, series):
-            ax.set_ylabel(axis_label)
-        base_ax.set_xlabel("r/R")
-        base_ax.set_title(title)
-        base_ax.grid(True)
-        self._combined_legend(base_ax, *axes[1:])
+        for slot, members in owners.items():
+            axes[slot].set_ylabel(", ".join(series[index][1] for index in members))
+        for panel in range(panel_count):
+            panel_axes[panel].grid(True)
+            twin = axes.get((panel, 1))
+            self._combined_legend(panel_axes[panel], *(t for t in (twin,) if t is not None))
+        panel_axes[-1].set_xlabel("r/R")
+        panel_axes[0].set_title(title)
         return self._finish_plot(fig)
 
     def _collect_hover_sweep(
@@ -2697,7 +2823,8 @@ class PycopterWebApp:
             return
         legend.get_frame().set_facecolor(THEME["panel_alt"])
         legend.get_frame().set_edgecolor(THEME["border"])
-        legend.get_frame().set_alpha(0.95)
+        # Slightly translucent so a curve running under the legend stays visible.
+        legend.get_frame().set_alpha(0.82)
         for text in legend.get_texts():
             text.set_color(THEME["text"])
 

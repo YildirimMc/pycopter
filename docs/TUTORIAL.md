@@ -153,13 +153,21 @@ region — widen the alpha range and regenerate rather than ignoring it.
 Whatever you last generated. The figure is drawn at the size of your plot area,
 so it stays legible on any monitor.
 
-**Reading multi-axis plots.** Where a plot shows quantities of different units
-or very different magnitudes, each one gets its own y-axis, colour-matched to
-its curve — element torque is only a few percent of element thrust, and Mach is
-a millionth of Reynolds, so a shared scale would flatten one to a line at zero.
-Colour tells you which quantity a curve is; line style tells you which rotor
-(solid upper, dashed lower). Curves that trace the same shape carry staggered
-markers so you can still separate them where they overlap.
+**Reading multi-quantity plots.** Quantities are arranged by their actual
+scale. Two that sit within a factor of five share one y-axis. One that is much
+larger or smaller takes the right-hand axis — element torque is only about 3%
+of element thrust, so on a shared axis it would read as a flat line at zero. A
+third quantity on yet another scale moves to its own panel underneath, sharing
+the same r/R axis, rather than being crammed onto a third scale.
+
+An axis carrying a single quantity is tinted to match its curve, so you can see
+at a glance which scale to read a line against. Colour tells you which quantity
+a curve is; line style tells you which rotor (solid upper, dashed lower).
+
+One case worth knowing: Reynolds number and Mach number are both proportional
+to local blade speed, so they trace exactly the same shape. Put on opposite
+autoscaled axes they would draw the same line and one would silently hide the
+other, so PyCopter always separates them into different panels.
 
 ### Summary tab
 

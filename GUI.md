@@ -266,23 +266,41 @@ All coaxial outputs are on `CoaxialHoverResult`.
 
 ## Plot Axis Rules
 
-- Quantities with different units or magnitudes get their own y-axis. A series
-  squashed onto another series' scale reads as a flat line at zero and hides
-  real information: element torque is about 3% of element thrust, Cd and Cm are
-  a few percent of Cl, and Mach is around 1e-6 of Reynolds.
-- `PycopterWebApp._plot_element_series` is the shared entry point for
-  per-element plots against `r/R`. It assigns one accent-coloured axis per
-  quantity, offsetting the third axis outward so its spine clears the second.
-- Colour identifies the quantity and line style identifies the rotor, so a
-  coaxial case keeps the same colour coding as a single rotor. Per-quantity
-  markers are staggered along the span so curves that trace the same shape,
-  such as Reynolds and Mach, stay distinguishable where they overlap.
-- Twin axes are created through `_twin_axis` so `_finish_plot` can colour the
-  matching spine, ticks, and label, and skip the duplicate grid. A single
-  combined legend covers every axis in the figure.
-- Series that share a unit stay on one axis. `Forward Flight Powers vs
-  Velocity` deliberately keeps induced, profile, parasite, and total power
-  together because their relative size is the point of the plot.
+`PycopterWebApp._axis_layout` decides the arrangement from the measured data,
+so the same plot adapts to a different rotor design. Three rules, in order:
+
+1. **Same scale, same axis.** Two quantities whose magnitudes are within
+   `SHARED_AXIS_MAX_RATIO` (5) share one y-axis, so the smaller still spans at
+   least a fifth of it. Induced velocity and loss factor differ by 3.6x and
+   share an axis.
+2. **Different scale, second axis.** Beyond that ratio a quantity takes the
+   right-hand axis of the same panel. Element torque is 3% of element thrust,
+   and Cd is 3% of Cl, so both are twinned; on a shared axis they would read as
+   a flat line at zero.
+3. **A third scale gets its own panel.** A quantity that fits neither axis
+   moves to a stacked panel sharing the x-axis, up to `MAX_PLOT_PANELS`. Do not
+   reintroduce a third y-axis on an offset spine: it is hard to read and was
+   removed for that reason.
+
+Two further constraints:
+
+- **Never put identically shaped curves on opposing autoscaled axes.** Both
+  axes stretch their series to fill the panel, so the curves land exactly on
+  top of each other and one silently hides the other. `_shapes_coincide`
+  normalises both series to 0..1 and treats a maximum gap below
+  `COINCIDENT_SHAPE_GAP` as coincident; such a pair is split across panels.
+  Reynolds and Mach are the live example, both linear in radius with a measured
+  gap of 0.0000.
+- **Series that share a unit and scale stay together.** `Forward Flight Powers
+  vs Velocity` deliberately keeps induced, profile, parasite, and total power
+  on one axis because their relative size is the point of the plot.
+
+Presentation follows from the layout: colour identifies the quantity and line
+style identifies the rotor, so a coaxial case keeps the same coding as a single
+rotor. An axis carrying exactly one quantity is tinted to match its curve; a
+shared axis stays neutral and lists both labels. Twin axes are created through
+`_twin_axis` so `_finish_plot` can colour the matching spine and skip the
+duplicate grid, and each panel gets one combined legend.
 
 ## XFOIL Cache And Parallelism
 

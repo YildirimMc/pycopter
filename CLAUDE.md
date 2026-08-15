@@ -73,7 +73,8 @@
 - Resizing the window does not re-run sweep plots, since those re-run the solver many times. CSS keeps the existing raster inside the frame until the next Generate Plot.
 - Panel renders each component into its own shadow root, so browser-side helpers must walk shadow roots; a plain `document.querySelector` will not find dashboard elements.
 - The output log is resizable upwards against the result area via `LogSplitter`. Its start height is its minimum. Bokeh does not run a layout pass for a plain height change, so the terminal must be refitted explicitly through the Panel terminal view or xterm keeps its old row count inside a taller box.
-- Plot quantities with different units or magnitudes must each get their own y-axis; route per-element plots through `_plot_element_series` and create twins with `_twin_axis` so `_finish_plot` can colour and de-duplicate them. Series sharing a unit stay on one axis.
+- Plot axis layout is decided from the data by `_axis_layout`: quantities within `SHARED_AXIS_MAX_RATIO` share a y-axis, a larger gap takes the right-hand axis, and a third scale gets its own stacked panel. Never reintroduce a third y-axis on an offset spine. Route per-element plots through `_plot_element_series`.
+- Two identically shaped curves on opposing autoscaled axes draw on top of each other and hide one another; `_shapes_coincide` detects this and forces a panel split. Reynolds and Mach are the live case.
 - `tests/test_web_gui_browser.py` locks this in at 1920x937, 2560x1329, and 1366x728, collapsed and expanded, plus a real drag of the log splitter. Run it after any layout change.
 
 ## Conventions
